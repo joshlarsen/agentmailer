@@ -6,3 +6,4 @@ node_modules/
 wrangler.deploy.json
 coverage/
 docs/planning/
+config.json

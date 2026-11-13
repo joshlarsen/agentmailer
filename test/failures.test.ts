@@ -351,3 +351,65 @@ it('recognizes idempotency hashes persisted before the type cleanup', async () =
   expect((await json(response, attemptSchema)).status).toBe('uncertain')
   expect(send).not.toHaveBeenCalled()
 })
+
+it('enforces reduced inbound and outbound size policy before sending', async () => {
+  const send = mockSend()
+  const configured = { ...environment, MAX_MESSAGE_MIB: '1', EMAIL: { send } }
+  const identity = await json(
+    await call('/agents', 'test-owner', { name: 'size-policy' }),
+    credentialSchema,
+  )
+  const sizeMailbox = await json(
+    await call('/mailboxes', identity.token, { name: 'size-policy' }),
+    mailboxCredentialSchema,
+  )
+  const incoming = incomingMessage({ rawSize: 1024 * 1024 + 1 })
+  await worker.email(incoming, configured)
+  expect(incoming.setReject).toHaveBeenCalledWith('Message exceeds 1 MiB')
+  const result = await call(
+    '/send',
+    sizeMailbox.token,
+    {
+      ...payload,
+      text: 'a'.repeat(1024 * 1024 - 16000),
+    },
+    'POST',
+    configured,
+    { 'Idempotency-Key': 'reduced-size' },
+  )
+  expect(result.status).toBe(413)
+  expect(send).not.toHaveBeenCalled()
+})
+
+it('copies quota defaults only when an identity is created', async () => {
+  const first = await json(
+    await call('/agents', 'test-owner', { name: 'defaults-before' }, 'POST', {
+      ...environment,
+      MAILBOX_LIMIT: '2',
+      DAILY_LIMIT: '3',
+    }),
+    credentialSchema,
+  )
+  const second = await json(
+    await call('/agents', 'test-owner', { name: 'defaults-after' }, 'POST', {
+      ...environment,
+      MAILBOX_LIMIT: '4',
+      DAILY_LIMIT: '5',
+    }),
+    credentialSchema,
+  )
+  expect(
+    await environment.DB.prepare(
+      'SELECT mailbox_limit,daily_limit FROM agents WHERE id=?',
+    )
+      .bind(first.id)
+      .first(),
+  ).toEqual({ mailbox_limit: 2, daily_limit: 3 })
+  expect(
+    await environment.DB.prepare(
+      'SELECT mailbox_limit,daily_limit FROM agents WHERE id=?',
+    )
+      .bind(second.id)
+      .first(),
+  ).toEqual({ mailbox_limit: 4, daily_limit: 5 })
+})

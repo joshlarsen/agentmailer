@@ -4,9 +4,6 @@
   "compatibility_date": "2026-11-13",
   "vars": {
     "MAIL_DOMAIN": "agents.example.com",
-    "RETENTION_DAYS": "0",
-    "MAILBOX_LIMIT": "10",
-    "DAILY_LIMIT": "100",
   },
   "d1_databases": [
     {

@@ -21,8 +21,6 @@ const savedState = {
   account: 'a'.repeat(32),
   domain: 'agents.example.com',
   name: 'test-mail',
-  retention: '30',
-  sending: true,
 }
 
 function fixture(t, { state = savedState, env = {} } = {}) {
@@ -33,6 +31,15 @@ function fixture(t, { state = savedState, env = {} } = {}) {
   mkdirSync(join(root, 'bin'))
   copyFileSync(resolve('test/fixtures/wrangler.cjs'), join(root, 'bin/npx'))
   chmodSync(join(root, 'bin/npx'), 0o755)
+  if (state !== null)
+    writeFileSync(
+      join(root, 'config.json'),
+      JSON.stringify({
+        mailDomain: savedState.domain,
+        retentionDays: 30,
+        sendingEnabled: true,
+      }),
+    )
   if (state !== null)
     writeFileSync(
       join(root, '.deployment.json'),
@@ -141,7 +148,11 @@ test('fresh receive-only setup collects settings without adding a sending bindin
     ],
   )
   assert.equal(result.code, 0, result.stderr)
-  assert.equal(f.readState().sending, false)
+  assert.equal(
+    JSON.parse(readFileSync(join(f.root, 'config.json'), 'utf8'))
+      .sendingEnabled,
+    false,
+  )
   assert.equal(f.readState().account, 'b'.repeat(32))
   const config = JSON.parse(
     readFileSync(join(f.root, 'wrangler.deploy.json'), 'utf8'),
@@ -153,8 +164,8 @@ test('fresh receive-only setup collects settings without adding a sending bindin
 test('malformed or invalid saved state stops before remote commands', async (t) => {
   for (const state of [
     '{broken',
-    { ...savedState, sending: 'false' },
-    { ...savedState, retention: '-1' },
+    { ...savedState, account: 'invalid' },
+    { ...savedState, db: '' },
   ]) {
     const f = fixture(t, { state })
     const before = readFileSync(join(f.root, '.deployment.json'), 'utf8')
@@ -248,4 +259,72 @@ test('deployment failure after installing the owner secret preserves it on resum
   const resumed = await f.invoke()
   assert.equal(resumed.code, 0, resumed.stderr)
   assert.equal(f.calls().filter((call) => call.args[0] === 'secret').length, 1)
+})
+
+test('policy edits survive upgrades and config inspection makes no remote calls', async (t) => {
+  const f = fixture(t)
+  assert.equal((await f.invoke()).code, 0)
+  const path = join(f.root, 'config.json')
+  const policy = JSON.parse(readFileSync(path, 'utf8'))
+  policy.retentionDays = 7
+  policy.maxMessageMiB = 1
+  policy.defaults = { mailboxesPerIdentity: 23 }
+  writeFileSync(path, JSON.stringify(policy))
+  const before = f.calls().length
+  const shown = await f.invoke(['--config'])
+  assert.equal(shown.code, 0, shown.stderr)
+  assert.equal(f.calls().length, before)
+  assert.match(shown.stdout, /new identities only/)
+  assert.equal((await f.invoke(['--upgrade'])).code, 0)
+  const generated = JSON.parse(
+    readFileSync(join(f.root, 'wrangler.deploy.json'), 'utf8'),
+  )
+  assert.equal(generated.vars.RETENTION_DAYS, '7')
+  assert.equal(generated.vars.MAILBOX_LIMIT, '23')
+  assert.equal(generated.vars.MAX_MESSAGE_MIB, '1')
+  policy.unknownOption = true
+  writeFileSync(path, JSON.stringify(policy))
+  const count = f.calls().length
+  assert.equal((await f.invoke(['--upgrade'])).code, 1)
+  assert.equal(f.calls().length, count)
+})
+
+test('missing config fails with setup guidance and no remote calls or file writes', async (t) => {
+  const f = fixture(t)
+  rmSync(join(f.root, 'config.json'))
+  const before = readFileSync(join(f.root, '.deployment.json'), 'utf8')
+  for (const args of [['--config'], ['--upgrade'], []]) {
+    const result = await f.invoke(args)
+    assert.equal(result.code, 1)
+    assert.match(result.stderr, /config\.json was not found/)
+    assert.match(result.stderr, /npm run setup/)
+    assert.doesNotMatch(result.stderr, /invalid_type|expected object/)
+    assert.deepEqual(f.calls(), [])
+    assert.equal(existsSync(join(f.root, 'config.json')), false)
+    assert.equal(readFileSync(join(f.root, '.deployment.json'), 'utf8'), before)
+  }
+  const fresh = fixture(t, { state: null })
+  assert.equal((await fresh.invoke(['--config'])).code, 1)
+  assert.deepEqual(fresh.calls(), [])
+})
+
+test('fresh setup preserves an existing config.json', async (t) => {
+  const f = fixture(t, { state: null })
+  const path = join(f.root, 'config.json')
+  const policy = JSON.stringify({
+    mailDomain: 'agents.example.com',
+    maxMessageMiB: 2,
+  })
+  writeFileSync(path, policy)
+  const result = await f.invoke(
+    [],
+    [['Cloudflare account ID:', 'b'.repeat(32)]],
+  )
+  assert.equal(result.code, 0, result.stderr)
+  assert.equal(readFileSync(path, 'utf8'), policy)
+  assert.doesNotMatch(result.stdout, /Retention days|Enable sending/)
+  const generated = JSON.parse(
+    readFileSync(join(f.root, 'wrangler.deploy.json'), 'utf8'),
+  )
+  assert.equal(generated.vars.MAX_MESSAGE_MIB, '2')
 })

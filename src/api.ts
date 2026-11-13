@@ -1,10 +1,12 @@
 import { resolver } from 'hono-openapi'
 import { z } from 'zod'
 
+import { mailboxLimitSchema, dailyLimitSchema, MAX_ATTACHMENTS } from './config'
+
 export const agentSchema = z.object({
   name: z.string().min(1).max(100),
-  mailboxLimit: z.number().int().min(1).max(1000).optional(),
-  dailyLimit: z.number().int().min(1).max(100000).optional(),
+  mailboxLimit: mailboxLimitSchema.optional(),
+  dailyLimit: dailyLimitSchema.optional(),
 })
 export const mailboxSchema = z.object({
   name: z.string().regex(/^[a-z0-9][a-z0-9_-]{0,63}$/),
@@ -49,12 +51,12 @@ export const sendSchema = z
             ),
         }),
       )
-      .max(32)
+      .max(MAX_ATTACHMENTS)
       .optional(),
   })
   .refine((b) => !!(b.text || b.html))
   .describe(
-    'Requires nonempty text or html. JSON plus 16 KiB must fit 5 MiB. Maximum 50 recipients across to/cc/bcc. No CR or LF in addresses, subject, name, or attachment filename/type.',
+    'Requires nonempty text or html. JSON plus 16 KiB must fit the configured message limit (default 5 MiB). Maximum 50 recipients across to/cc/bcc. No CR or LF in addresses, subject, name, or attachment filename/type.',
   )
 
 const errorSchema = z.object({ error: z.object({ code: z.string() }) })

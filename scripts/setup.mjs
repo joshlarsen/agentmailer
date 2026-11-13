@@ -6,8 +6,11 @@ import { parseArgs } from 'node:util'
 
 import { z } from 'zod'
 
+import { configSchema } from '../src/config.ts'
+
 const STATE_PATH = '.deployment.json'
 const CONFIG_PATH = 'wrangler.deploy.json'
+const POLICY_PATH = 'config.json'
 const accountSchema = z.string().regex(/^[a-f0-9]{32}$/)
 const domainSchema = z
   .string()
@@ -16,12 +19,10 @@ const retentionSchema = z
   .string()
   .regex(/^\d+$/)
   .refine((value) => Number.isSafeInteger(Number(value)))
-const stateSchema = z.object({
+const stateSchema = z.strictObject({
   account: accountSchema,
   domain: domainSchema,
   name: z.string().regex(/^[a-z0-9][a-z0-9-]{0,62}$/),
-  retention: retentionSchema,
-  sending: z.boolean(),
   db: z.string().min(1).optional(),
   bucket: z.boolean().optional(),
   secret: z.boolean().optional(),
@@ -141,6 +142,9 @@ async function saveState(state) {
 }
 
 async function collectSettings() {
+  const savedPolicy = await readJsonFile(POLICY_PATH)
+  const existingPolicy =
+    savedPolicy === undefined ? undefined : configSchema.parse(savedPolicy)
   await runWrangler(['login'])
   await runWrangler(['whoami'])
   const prompt = createInterface({
@@ -151,6 +155,12 @@ async function collectSettings() {
     const account = accountSchema.parse(
       (await prompt.question('Cloudflare account ID: ')).trim(),
     )
+    if (existingPolicy)
+      return {
+        account,
+        domain: existingPolicy.mailDomain,
+        name: `agentmailer-${randomBytes(4).toString('hex')}`,
+      }
     const domain = domainSchema.parse(
       (await prompt.question('Dedicated mail domain/subdomain: '))
         .trim()
@@ -163,11 +173,17 @@ async function collectSettings() {
     const retention = retentionSchema.parse(
       (await prompt.question('Retention days (0 = forever): ')).trim() || '0',
     )
+    const policy = configSchema.parse({
+      mailDomain: domain,
+      sendingEnabled: sending,
+      retentionDays: Number(retention),
+    })
+    await writeFile(POLICY_PATH, JSON.stringify(policy, null, 2) + '\n', {
+      flag: 'wx',
+    })
     return {
       account,
       domain,
-      sending,
-      retention,
       name: `agentmailer-${randomBytes(4).toString('hex')}`,
     }
   } finally {
@@ -241,8 +257,11 @@ async function ensureBucket(state) {
   })
 }
 
-/** @param {DeploymentState} state */
-function buildConfig(state) {
+/**
+ * @param {DeploymentState} state
+ * @param {import('../src/config.ts').Configuration} policy
+ */
+function buildConfig(state, policy) {
   if (!state.db)
     throw new Error(
       'A database must be provisioned before generating configuration.',
@@ -254,9 +273,10 @@ function buildConfig(state) {
     compatibility_date: '2026-11-13',
     vars: {
       MAIL_DOMAIN: state.domain,
-      RETENTION_DAYS: state.retention,
-      MAILBOX_LIMIT: '10',
-      DAILY_LIMIT: '100',
+      RETENTION_DAYS: String(policy.retentionDays),
+      MAX_MESSAGE_MIB: String(policy.maxMessageMiB),
+      MAILBOX_LIMIT: String(policy.defaults.mailboxesPerIdentity),
+      DAILY_LIMIT: String(policy.defaults.dailyRecipientsPerMailbox),
     },
     d1_databases: [
       {
@@ -268,7 +288,7 @@ function buildConfig(state) {
     ],
     r2_buckets: [{ binding: 'MAIL', bucket_name: state.name }],
     triggers: { crons: ['*/15 * * * *'] },
-    ...(state.sending ? { send_email: [{ name: 'EMAIL' }] } : {}),
+    ...(policy.sendingEnabled ? { send_email: [{ name: 'EMAIL' }] } : {}),
   }
 }
 
@@ -288,16 +308,29 @@ async function ensureOwnerSecret(state) {
   await saveState(state)
 }
 
-/** @param {DeploymentState} state */
-function printNextSteps(state) {
+/**
+ * @param {DeploymentState} state
+ * @param {import('../src/config.ts').Configuration} policy
+ */
+function printNextSteps(state, policy) {
   console.log(
     `In Cloudflare Email Service, enable routing for ${state.domain} and route catch-all to Worker ${state.name}. Do not replace existing MX records without reviewing conflicts.`,
   )
-  if (state.sending)
+  if (policy.sendingEnabled)
     console.log('Onboard the same domain in Email Sending and verify DNS.')
   console.log(
     'Check the printed Worker URL /health; then follow README.md to create an agent and mailbox.',
   )
+}
+
+/** @returns {Promise<import('../src/config.ts').Configuration>} */
+async function loadPolicy() {
+  const saved = await readJsonFile(POLICY_PATH)
+  if (saved === undefined)
+    throw new Error(
+      'config.json was not found. Run npm run setup to create it, or restore your config.json before deploying an existing installation.',
+    )
+  return configSchema.parse(saved)
 }
 
 /** @param {boolean} upgrade */
@@ -307,6 +340,10 @@ async function deploy(upgrade) {
     throw new Error('No saved deployment. Run npm run setup first.')
   const state =
     saved === undefined ? await collectSettings() : stateSchema.parse(saved)
+  if (saved === undefined) await saveState(state)
+  const policy = await loadPolicy()
+  if (policy.mailDomain !== state.domain)
+    throw new Error('config.json mailDomain must match this deployment domain.')
   await saveState(state)
   state.db = await ensureDatabase(state)
   await saveState(state)
@@ -315,7 +352,7 @@ async function deploy(upgrade) {
   await saveState(state)
   await writeFile(
     CONFIG_PATH,
-    JSON.stringify(buildConfig(state), null, 2) + '\n',
+    JSON.stringify(buildConfig(state, policy), null, 2) + '\n',
   )
   await runWrangler(
     [
@@ -333,7 +370,7 @@ async function deploy(upgrade) {
   await runWrangler(['deploy', '--config', CONFIG_PATH], {
     account: state.account,
   })
-  printNextSteps(state)
+  printNextSteps(state, policy)
 }
 
 async function diagnose() {
@@ -363,12 +400,23 @@ async function main() {
   const { values } = parseArgs({
     options: {
       doctor: { type: 'boolean' },
+      config: { type: 'boolean' },
       upgrade: { type: 'boolean' },
       help: { type: 'boolean' },
     },
   })
+  if (values.config) {
+    const policy = await loadPolicy()
+    console.log(JSON.stringify(policy, null, 2))
+    console.log(
+      'Sizes are MiB. Changes apply on deploy. Quota defaults affect new identities only. Retention affects existing messages during cleanup; expiry removes idempotency protection.',
+    )
+    return
+  }
   if (values.help) {
-    console.log('Usage: node scripts/setup.mjs [--upgrade | --doctor]')
+    console.log(
+      'Usage: node scripts/setup.mjs [--upgrade | --doctor | --config]',
+    )
     return
   }
   if (values.doctor && values.upgrade)

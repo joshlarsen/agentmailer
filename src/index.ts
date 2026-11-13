@@ -19,15 +19,22 @@ import {
   sendResult,
   securitySchemes,
 } from './api'
+import {
+  runtimeConfig,
+  OUTBOUND_ALLOWANCE_BYTES,
+  REQUEST_BODY_BYTES,
+  MAX_RECIPIENTS,
+} from './config'
 export type Env = {
   DB: D1Database
   MAIL: R2Bucket
   EMAIL?: SendEmail
   OWNER_TOKEN: string
   MAIL_DOMAIN: string
-  RETENTION_DAYS: string
-  MAILBOX_LIMIT: string
-  DAILY_LIMIT: string
+  RETENTION_DAYS?: string
+  MAILBOX_LIMIT?: string
+  DAILY_LIMIT?: string
+  MAX_MESSAGE_MIB?: string
 }
 type Principal = { kind: 'owner' | 'agent' | 'mailbox'; id: string }
 type AppEnvironment = { Bindings: Env; Variables: { principal: Principal } }
@@ -90,7 +97,6 @@ type SendAttempt = Pick<
 >
 type SendRequest = z.infer<typeof sendSchema>
 const app = new Hono<AppEnvironment>()
-const MAX_MESSAGE_BYTES = 5 * 1024 * 1024
 
 const id = () => crypto.randomUUID()
 
@@ -146,6 +152,7 @@ app.onError((error, c) => {
 })
 
 app.use('*', async (c, next) => {
+  runtimeConfig(c.env)
   c.header('Cache-Control', 'no-store')
   await next()
 })
@@ -235,7 +242,7 @@ async function readJsonBody(c: AppContext): Promise<unknown> {
     const chunk = await reader.read()
     if (chunk.done) break
     size += chunk.value.length
-    if (size > 8 * 1024 * 1024) {
+    if (size > REQUEST_BODY_BYTES) {
       await reader.cancel()
       fail(413, 'too_large')
     }
@@ -299,8 +306,10 @@ app.post(
       agentId,
       requestBody.name,
       await hash(credential),
-      requestBody.mailboxLimit ?? Number(c.env.MAILBOX_LIMIT || 10),
-      requestBody.dailyLimit ?? Number(c.env.DAILY_LIMIT || 100),
+      requestBody.mailboxLimit ??
+        runtimeConfig(c.env).defaults.mailboxesPerIdentity,
+      requestBody.dailyLimit ??
+        runtimeConfig(c.env).defaults.dailyRecipientsPerMailbox,
     ).run()
     return c.json({ id: agentId, token: credential }, 201)
   },
@@ -950,10 +959,11 @@ async function send(c: AppContext, reply?: MessageRow): Promise<Response> {
     sendInput.to.length +
     (sendInput.cc?.length || 0) +
     (sendInput.bcc?.length || 0)
-  if (recipientCount > 50) fail(400, 'too_many_recipients')
+  if (recipientCount > MAX_RECIPIENTS) fail(400, 'too_many_recipients')
   if (
-    new TextEncoder().encode(JSON.stringify(sendInput)).length + 16384 >
-    MAX_MESSAGE_BYTES
+    new TextEncoder().encode(JSON.stringify(sendInput)).length +
+      OUTBOUND_ALLOWANCE_BYTES >
+    runtimeConfig(env).maxMessageMiB * 1024 * 1024
   )
     fail(413, 'too_large')
   const idempotencyKey = c.req.header('Idempotency-Key')
@@ -1201,7 +1211,7 @@ async function remove(env: Env, record: MessageRow) {
 
 export async function cleanup(env: Env): Promise<void> {
   const now = Date.now(),
-    days = Number(env.RETENTION_DAYS || 0)
+    days = runtimeConfig(env).retentionDays
   if (days > 0)
     await statement(
       env,
@@ -1245,8 +1255,13 @@ export default {
   fetch: app.fetch,
 
   async email(incomingMessage: ForwardableEmailMessage, env: Env) {
-    if (incomingMessage.rawSize > MAX_MESSAGE_BYTES) {
-      incomingMessage.setReject('Message exceeds 5 MiB')
+    if (
+      incomingMessage.rawSize >
+      runtimeConfig(env).maxMessageMiB * 1024 * 1024
+    ) {
+      incomingMessage.setReject(
+        `Message exceeds ${runtimeConfig(env).maxMessageMiB} MiB`,
+      )
       return
     }
     const mailbox = await statement(
@@ -1259,8 +1274,10 @@ export default {
       return
     }
     const raw = await new Response(incomingMessage.raw).arrayBuffer()
-    if (raw.byteLength > MAX_MESSAGE_BYTES) {
-      incomingMessage.setReject('Message exceeds 5 MiB')
+    if (raw.byteLength > runtimeConfig(env).maxMessageMiB * 1024 * 1024) {
+      incomingMessage.setReject(
+        `Message exceeds ${runtimeConfig(env).maxMessageMiB} MiB`,
+      )
       return
     }
     const digest = await hash(raw),

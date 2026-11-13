@@ -7,7 +7,7 @@
   "type": "module",
   "scripts": {
     "check": "tsc && tsc -p test/tsconfig.json",
-    "deploy": "wrangler deploy --config wrangler.deploy.json",
+    "deploy": "node scripts/setup.mjs --upgrade",
     "dev": "wrangler dev",
     "doctor": "node scripts/setup.mjs --doctor",
     "format": "oxfmt --write .",
@@ -16,7 +16,8 @@
     "lint:fix": "oxlint --deny-warnings --fix .",
     "setup": "node scripts/setup.mjs",
     "test": "vitest run && node --test test/setup.test.mjs",
-    "upgrade": "node scripts/setup.mjs --upgrade"
+    "upgrade": "node scripts/setup.mjs --upgrade",
+    "config": "node scripts/setup.mjs --config"
   },
   "dependencies": {
     "@hono/standard-validator": "^0.4.1",

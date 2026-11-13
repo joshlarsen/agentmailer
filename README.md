@@ -21,9 +21,45 @@ In Cloudflare Email Service:
 3. For sending, enable Workers Paid and onboard the same domain in Email Sending; complete DNS verification.
 4. Visit the Worker URL printed by Wrangler at `/health`. Create a mailbox below, send it an external test email, and verify receipt. If sending is enabled, send and reply to an external address and verify threading and attachments.
 
-`npm run doctor` checks account authentication and database access; it also lists the remaining dashboard checks. `npm run upgrade` requires saved deployment settings, reuses existing resources, and applies migrations before redeploying. Local state is the source of truth for wizard-generated config. Change `.deployment.json` retention or sending settings before rerunning setup. For custom settings edit generated config and use `npm run deploy` directly.
+## Configuration
 
-Receive-only configuration omits `send_email`. `npm run deploy` alone requires a generated deployment configuration. No production resources are created during tests or build checks.
+Edit `config.json`, created by setup, then inspect and deploy:
+
+```sh
+npm run config
+npm run deploy
+```
+
+| Setting                              | Default             | Meaning                                                                                      |
+| ------------------------------------ | ------------------- | -------------------------------------------------------------------------------------------- |
+| `mailDomain`                         | Chosen during setup | Deployment domain; changing an existing domain requires a separate migration                 |
+| `sendingEnabled`                     | `false`             | Generate the optional sending binding; sending requires Workers Paid and domain onboarding   |
+| `retentionDays`                      | `0`                 | Forever; positive integer days expire existing incoming and outgoing messages during cleanup |
+| `maxMessageMiB`                      | `5`                 | Integer 1–5; inbound MIME size and outbound JSON plus 16 KiB allowance                       |
+| `defaults.mailboxesPerIdentity`      | `10`                | Active mailboxes per new provisioning identity; range 1–1,000                                |
+| `defaults.dailyRecipientsPerMailbox` | `100`               | Recipient deliveries per mailbox per UTC day for new identities; range 1–100,000             |
+
+Omitted settings use these defaults. Unknown fields and invalid values stop deployment.
+Quota defaults are copied into new identities; existing limits remain unchanged.
+Owners can override quotas when creating an identity. Lower retention applies to
+existing messages and permanently deletes content, metadata, and message-based
+idempotency protection. Cleanup is batched, so expiry is not instantaneous.
+
+`config.json` is the human-editable source of policy.
+`.deployment.json` holds machine-managed resource IDs and resume progress.
+`wrangler.deploy.json` is generated: direct edits are overwritten on deployment.
+All three files are gitignored. Keep backups of settings and deployment state.
+Secrets remain in Wrangler; local `.dev.vars` is for development secrets only.
+
+`npm run deploy` and `npm run upgrade` both validate settings, regenerate config,
+apply migrations, and redeploy existing resources. Initial provisioning uses
+`npm run setup`. Receive-only deployments omit the sending binding.
+
+`npm run config` displays effective policy locally without credentials or remote
+calls. If `config.json` is missing, it exits with setup or restore guidance. `npm run doctor` checks account authentication and database access and lists
+remaining dashboard checks. Local development uses the same policy defaults;
+Wrangler variable overrides are validated at runtime. Tests and build checks do
+not create production resources.
 
 ## Credentials and usage
 
@@ -61,7 +97,7 @@ Message responses include bodies and attachment metadata; download bytes via the
 
 ## Reliability and limits
 
-- 5 MiB inbound limit. Outbound JSON plus a 16 KiB envelope/header allowance must fit 5 MiB. Maximum 50 recipients and 32 outgoing attachments.
+- Configured message limit defaults to 5 MiB (maximum 5 MiB). Outbound JSON plus a 16 KiB envelope/header allowance must fit it. Fixed safety bounds: 8 MiB HTTP request body, 50 recipients, 32 outgoing attachments, and 100 results per polling page (default 50).
 - Raw mail is stored before publication. Incoming content is deduplicated per mailbox; deliberately resending identical bytes is treated as a duplicate.
 - Bodies and attachments are parsed on demand and cached. Parsing can exceed Workers Free CPU limits even below 5 MiB; raw downloads remain available. Large-message parsing on Free requires live validation and is not guaranteed.
 - Pending storage writes are reconciled every 15 minutes after a one-hour grace period. Failed pending writes without content are removed. Incoming handler errors are surfaced to Cloudflare; do not assume the platform guarantees retry or exactly-once delivery.
