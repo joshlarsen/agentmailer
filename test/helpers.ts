@@ -1,7 +1,8 @@
-import { createExecutionContext, env } from "cloudflare:test"
-import { vi, type Mock } from "vitest"
-import { z } from "zod"
-import worker, { type Env } from "../src/index"
+import { createExecutionContext, env } from 'cloudflare:test'
+import { vi, type Mock } from 'vitest'
+import { z } from 'zod'
+
+import worker, { type Env } from '../src/index'
 
 declare global {
   namespace Cloudflare {
@@ -17,7 +18,7 @@ export const mailboxCredentialSchema = credentialSchema.extend({
 })
 export const attemptSchema = z.object({
   id: z.string(),
-  status: z.enum(["pending", "accepted", "failed", "uncertain"]),
+  status: z.enum(['pending', 'accepted', 'failed', 'uncertain']),
 })
 export const listSchema = z.object({
   messages: z.array(z.object({ id: z.string() })),
@@ -43,16 +44,16 @@ export async function call(
   path: string,
   token: string,
   data?: unknown,
-  method = data ? "POST" : "GET",
+  method = data ? 'POST' : 'GET',
   environment: Env = bindings,
   headers: Record<string, string> = {},
 ): Promise<Response> {
   return worker.fetch(
-    new Request("https://mail.test" + path, {
+    new Request('https://mail.test' + path, {
       method,
       headers: {
         Authorization: `Bearer ${token}`,
-        "Content-Type": "application/json",
+        'Content-Type': 'application/json',
         ...headers,
       },
       body: data ? JSON.stringify(data) : undefined,
@@ -70,14 +71,14 @@ export function incomingMessage(
     },
   })
   return {
-    from: "human@example.net",
-    to: "unknown@example.com",
+    from: 'human@example.net',
+    to: 'unknown@example.com',
     raw,
     rawSize: 0,
     headers: new Headers(),
     canBeForwarded: false,
     setReject: vi.fn(),
-    forward: vi.fn<ForwardableEmailMessage["forward"]>(),
+    forward: vi.fn<ForwardableEmailMessage['forward']>(),
     reply:
       vi.fn<
         (
@@ -105,7 +106,7 @@ export function overrideMethod<T extends object, K extends keyof T>(
     get(object, property) {
       if (property === key) return replacement
       const value: unknown = Reflect.get(object, property, object)
-      return typeof value === "function" ? value.bind(object) : value
+      return typeof value === 'function' ? value.bind(object) : value
     },
   })
 }

@@ -1,8 +1,11 @@
 {
   "$schema": "./node_modules/oxfmt/configuration_schema.json",
-  "semi": false,
+  "jsdoc": true,
   "printWidth": 80,
-  "sortPackageJson": false,
+  "semi": false,
+  "singleQuote": true,
+  "sortPackageJson": true,
+  "sortImports": true,
   "ignorePatterns": [
     "node_modules/**",
     ".wrangler/**",
