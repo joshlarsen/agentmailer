@@ -1,7 +1,24 @@
-import { Hono, type Context } from 'hono'
+import { Hono, type Context, type MiddlewareHandler } from 'hono'
+import { describeRoute, openAPIRouteHandler } from 'hono-openapi'
 import type { ContentfulStatusCode } from 'hono/utils/http-status'
 import PostalMime, { type Email } from 'postal-mime'
 import { z } from 'zod'
+
+import {
+  agentSchema,
+  mailboxSchema,
+  readSchema,
+  sendSchema,
+  replySchema,
+  healthSchema,
+  resolver,
+  routeErrors,
+  mailboxListSchema,
+  messageListSchema,
+  messageDetail,
+  sendResult,
+  securitySchemes,
+} from './api'
 export type Env = {
   DB: D1Database
   MAIL: R2Bucket
@@ -133,9 +150,24 @@ app.use('*', async (c, next) => {
   await next()
 })
 
-app.get('/health', (c) => c.json({ ok: true }))
+app.get(
+  '/health',
+  describeRoute({
+    summary: 'Liveness probe',
+    description: 'Requires no bearer credential.',
+    security: [],
+    responses: {
+      '200': {
+        description: 'Alive',
+        content: { 'application/json': { schema: resolver(healthSchema) } },
+      },
+    },
+    operationId: 'getHealth',
+  }),
+  (c) => c.json({ ok: true }),
+)
 
-app.use('/v1/*', async (c, next) => {
+const authenticate: MiddlewareHandler<AppEnvironment> = async (c, next) => {
   const auth = c.req.header('Authorization')?.match(/^Bearer (\S+)$/)?.[1]
   if (!auth) return fail(401, 'unauthorized')
   const digest = await hash(auth)
@@ -159,7 +191,12 @@ app.use('/v1/*', async (c, next) => {
     }
   }
   await next()
-})
+}
+
+for (const resource of ['/agents', '/mailboxes', '/messages', '/send']) {
+  app.use(resource, authenticate)
+  app.use(`${resource}/*`, authenticate)
+}
 
 function requireOwner(principal: Principal) {
   if (principal.kind !== 'owner') fail(403, 'forbidden')
@@ -224,175 +261,401 @@ const parse = <T>(schema: z.ZodType<T>, value: unknown): T => {
   return validation.data
 }
 
-app.post('/v1/admin/agents', async (c) => {
-  requireOwner(c.get('principal'))
-  const requestBody = parse(
-    z.object({
-      name: z.string().min(1).max(100),
-      mailboxLimit: z.number().int().min(1).max(1000).optional(),
-      dailyLimit: z.number().int().min(1).max(100000).optional(),
-    }),
-    await readJsonBody(c),
-  )
-  const credential = token(),
-    agentId = id()
-  await statement(
-    c.env,
-    'INSERT INTO agents(id,name,hash,mailbox_limit,daily_limit) VALUES(?,?,?,?,?)',
-    agentId,
-    requestBody.name,
-    await hash(credential),
-    requestBody.mailboxLimit ?? Number(c.env.MAILBOX_LIMIT || 10),
-    requestBody.dailyLimit ?? Number(c.env.DAILY_LIMIT || 100),
-  ).run()
-  return c.json({ id: agentId, token: credential }, 201)
-})
-
-app.get('/v1/admin/agents', async (c) => {
-  requireOwner(c.get('principal'))
-  return c.json(
-    (
-      await statement(
-        c.env,
-        'SELECT id,name,disabled,mailbox_limit,daily_limit FROM agents',
-      ).all<AgentRow>()
-    ).results,
-  )
-})
-
-app.delete('/v1/admin/agents/:id', async (c) => {
-  requireOwner(c.get('principal'))
-  await statement(
-    c.env,
-    'UPDATE agents SET disabled=1 WHERE id=?',
-    c.req.param('id'),
-  ).run()
-  return c.body(null, 204)
-})
-
-app.get('/v1/mailboxes', async (c) => {
-  const principal = c.get('principal')
-  if (principal.kind === 'mailbox') fail(403, 'forbidden')
-  return c.json(
-    (
-      await statement(
-        c.env,
-        principal.kind === 'owner'
-          ? 'SELECT * FROM mailboxes'
-          : 'SELECT * FROM mailboxes WHERE agent=?',
-        ...(principal.kind === 'owner' ? [] : [principal.id]),
-      ).all<MailboxRow>()
-    ).results,
-  )
-})
-
-app.post('/v1/mailboxes', async (c) => {
-  const principal = c.get('principal')
-  if (principal.kind !== 'agent') fail(403, 'provisioning_key_required')
-  const requestBody = parse(
-    z.object({ name: z.string().regex(/^[a-z0-9][a-z0-9_-]{0,63}$/) }),
-    await readJsonBody(c),
-  )
-  const mailboxId = id(),
-    keyId = id(),
-    credential = token()
-  const reservation = await statement(
-    c.env,
-    'INSERT INTO mailboxes(id,agent,address) SELECT ?,id,? FROM agents WHERE id=? AND disabled=0 AND (SELECT count(*) FROM mailboxes WHERE agent=agents.id AND disabled=0)<mailbox_limit',
-    mailboxId,
-    `${requestBody.name}@${c.env.MAIL_DOMAIN}`,
-    principal.id,
-  )
-    .run()
-    .catch((error: unknown) => {
-      if (hasErrorMessage(error, 'UNIQUE constraint failed: mailboxes.address'))
-        return fail(409, 'address_unavailable')
-      throw error
-    })
-  if (!reservation.meta.changes) fail(429, 'mailbox_limit')
-  await statement(
-    c.env,
-    'INSERT INTO keys(id,mailbox,hash) VALUES(?,?,?)',
-    keyId,
-    mailboxId,
-    await hash(credential),
-  ).run()
-  return c.json(
-    {
-      id: mailboxId,
-      address: `${requestBody.name}@${c.env.MAIL_DOMAIN}`,
-      keyId,
-      token: credential,
+app.post(
+  '/agents',
+  describeRoute({
+    summary: 'Create provisioning identity',
+    description: 'Requires owner bearer credential.',
+    security: [{ bearerAuth: [] }],
+    responses: {
+      ...routeErrors(401, 403, 500, 400, 413),
+      '201': {
+        description: 'Success',
+        content: {
+          'application/json': {
+            schema: {
+              type: 'object',
+              properties: { id: { type: 'string' }, token: { type: 'string' } },
+              required: ['id', 'token'],
+            },
+          },
+        },
+      },
     },
-    201,
-  )
-})
+    requestBody: {
+      required: true,
+      content: { 'application/json': { schema: resolver(agentSchema) } },
+    },
+    operationId: 'postAgents',
+  }),
+  async (c) => {
+    requireOwner(c.get('principal'))
+    const requestBody = parse(agentSchema, await readJsonBody(c))
+    const credential = token(),
+      agentId = id()
+    await statement(
+      c.env,
+      'INSERT INTO agents(id,name,hash,mailbox_limit,daily_limit) VALUES(?,?,?,?,?)',
+      agentId,
+      requestBody.name,
+      await hash(credential),
+      requestBody.mailboxLimit ?? Number(c.env.MAILBOX_LIMIT || 10),
+      requestBody.dailyLimit ?? Number(c.env.DAILY_LIMIT || 100),
+    ).run()
+    return c.json({ id: agentId, token: credential }, 201)
+  },
+)
 
-app.post('/v1/mailboxes/:id/keys', async (c) => {
-  await findManagedMailbox(c.env, c.get('principal'), c.req.param('id'))
-  const keyId = id(),
-    credential = token()
-  await statement(
-    c.env,
-    'INSERT INTO keys(id,mailbox,hash) VALUES(?,?,?)',
-    keyId,
-    c.req.param('id'),
-    await hash(credential),
-  ).run()
-  return c.json({ id: keyId, token: credential }, 201)
-})
+app.get(
+  '/agents',
+  describeRoute({
+    summary: 'List provisioning identities without credentials',
+    description: 'Requires owner bearer credential.',
+    security: [{ bearerAuth: [] }],
+    responses: {
+      ...routeErrors(401, 403, 500),
+      '200': {
+        description: 'Success',
+        content: {
+          'application/json': {
+            schema: {
+              type: 'array',
+              items: {
+                type: 'object',
+                properties: {
+                  id: { type: 'string' },
+                  name: { type: 'string' },
+                  disabled: { type: 'integer' },
+                  mailbox_limit: { type: 'integer' },
+                  daily_limit: { type: 'integer' },
+                },
+                required: [
+                  'id',
+                  'name',
+                  'disabled',
+                  'mailbox_limit',
+                  'daily_limit',
+                ],
+              },
+            },
+          },
+        },
+      },
+    },
+    operationId: 'getAgents',
+  }),
+  async (c) => {
+    requireOwner(c.get('principal'))
+    return c.json(
+      (
+        await statement(
+          c.env,
+          'SELECT id,name,disabled,mailbox_limit,daily_limit FROM agents',
+        ).all<AgentRow>()
+      ).results,
+    )
+  },
+)
 
-app.delete('/v1/mailboxes/:id/keys/:key', async (c) => {
-  await findManagedMailbox(c.env, c.get('principal'), c.req.param('id'))
-  await statement(
-    c.env,
-    'UPDATE keys SET revoked=1 WHERE id=? AND mailbox=?',
-    c.req.param('key'),
-    c.req.param('id'),
-  ).run()
-  return c.body(null, 204)
-})
+app.delete(
+  '/agents/:id',
+  describeRoute({
+    summary: 'Permanently disable identity and descendant access',
+    description: 'Requires owner bearer credential.',
+    security: [{ bearerAuth: [] }],
+    responses: {
+      ...routeErrors(401, 403, 500, 404),
+      '204': { description: 'Success' },
+    },
+    parameters: [
+      { name: 'id', in: 'path', required: true, schema: { type: 'string' } },
+    ],
+    operationId: 'deleteAgentsId',
+  }),
+  async (c) => {
+    requireOwner(c.get('principal'))
+    await statement(
+      c.env,
+      'UPDATE agents SET disabled=1 WHERE id=?',
+      c.req.param('id'),
+    ).run()
+    return c.body(null, 204)
+  },
+)
 
-app.delete('/v1/mailboxes/:id', async (c) => {
-  await findManagedMailbox(c.env, c.get('principal'), c.req.param('id'))
-  await statement(
-    c.env,
-    'UPDATE mailboxes SET disabled=1 WHERE id=?',
-    c.req.param('id'),
-  ).run()
-  return c.body(null, 204)
-})
+app.get(
+  '/mailboxes',
+  describeRoute({
+    summary: 'List owned mailboxes',
+    description: 'Requires owner or provisioning bearer credential.',
+    security: [{ bearerAuth: [] }],
+    responses: {
+      ...routeErrors(401, 403, 500),
+      '200': {
+        description: 'Success',
+        content: {
+          'application/json': {
+            schema: resolver(mailboxListSchema),
+          },
+        },
+      },
+    },
+    operationId: 'getMailboxes',
+  }),
+  async (c) => {
+    const principal = c.get('principal')
+    if (principal.kind === 'mailbox') fail(403, 'forbidden')
+    return c.json(
+      (
+        await statement(
+          c.env,
+          principal.kind === 'owner'
+            ? 'SELECT * FROM mailboxes'
+            : 'SELECT * FROM mailboxes WHERE agent=?',
+          ...(principal.kind === 'owner' ? [] : [principal.id]),
+        ).all<MailboxRow>()
+      ).results,
+    )
+  },
+)
 
-app.get('/v1/messages', async (c) => {
-  const mailboxId = requireMailboxId(c.get('principal'))
-  const after = Number(c.req.query('after') || 0),
-    limit = Number(c.req.query('limit') || 50),
-    direction = c.req.query('direction'),
-    unread = c.req.query('unread')
-  if (
-    !Number.isSafeInteger(after) ||
-    after < 0 ||
-    !Number.isInteger(limit) ||
-    limit < 1 ||
-    limit > 100 ||
-    (direction && !['incoming', 'outgoing'].includes(direction)) ||
-    (unread && !['true', 'false'].includes(unread))
-  )
-    fail(400, 'invalid_query')
-  const rows = await statement(
-    c.env,
-    `SELECT seq,id,direction,status,created,subject,sender,recipient,read,provider_id,error FROM messages WHERE mailbox=? AND seq>? AND status NOT IN ('pending','deleting')${direction ? ' AND direction=?' : ''}${unread ? ' AND read=?' : ''} ORDER BY seq LIMIT ?`,
-    mailboxId,
-    after,
-    ...(direction ? [direction] : []),
-    ...(unread ? [unread === 'true' ? 0 : 1] : []),
-    limit,
-  ).all<MessageSummary>()
-  return c.json({
-    messages: rows.results,
-    nextCursor: rows.results.at(-1)?.seq ?? after,
-  })
-})
+app.post(
+  '/mailboxes',
+  describeRoute({
+    summary: 'Create address and first mailbox key',
+    description: 'Requires provisioning bearer credential.',
+    security: [{ bearerAuth: [] }],
+    responses: {
+      ...routeErrors(401, 403, 500, 400, 413, 409, 429),
+      '201': {
+        description: 'Success',
+        content: {
+          'application/json': {
+            schema: {
+              type: 'object',
+              properties: {
+                id: { type: 'string' },
+                address: { type: 'string' },
+                keyId: { type: 'string' },
+                token: { type: 'string' },
+              },
+              required: ['id', 'address', 'keyId', 'token'],
+            },
+          },
+        },
+      },
+    },
+    requestBody: {
+      required: true,
+      content: { 'application/json': { schema: resolver(mailboxSchema) } },
+    },
+    operationId: 'postMailboxes',
+  }),
+  async (c) => {
+    const principal = c.get('principal')
+    if (principal.kind !== 'agent') fail(403, 'provisioning_key_required')
+    const requestBody = parse(mailboxSchema, await readJsonBody(c))
+    const mailboxId = id(),
+      keyId = id(),
+      credential = token()
+    const reservation = await statement(
+      c.env,
+      'INSERT INTO mailboxes(id,agent,address) SELECT ?,id,? FROM agents WHERE id=? AND disabled=0 AND (SELECT count(*) FROM mailboxes WHERE agent=agents.id AND disabled=0)<mailbox_limit',
+      mailboxId,
+      `${requestBody.name}@${c.env.MAIL_DOMAIN}`,
+      principal.id,
+    )
+      .run()
+      .catch((error: unknown) => {
+        if (
+          hasErrorMessage(error, 'UNIQUE constraint failed: mailboxes.address')
+        )
+          return fail(409, 'address_unavailable')
+        throw error
+      })
+    if (!reservation.meta.changes) fail(429, 'mailbox_limit')
+    await statement(
+      c.env,
+      'INSERT INTO keys(id,mailbox,hash) VALUES(?,?,?)',
+      keyId,
+      mailboxId,
+      await hash(credential),
+    ).run()
+    return c.json(
+      {
+        id: mailboxId,
+        address: `${requestBody.name}@${c.env.MAIL_DOMAIN}`,
+        keyId,
+        token: credential,
+      },
+      201,
+    )
+  },
+)
+
+app.post(
+  '/mailboxes/:id/keys',
+  describeRoute({
+    summary: 'Issue replacement or additional mailbox key',
+    description: 'Requires owner or owning provisioning bearer credential.',
+    security: [{ bearerAuth: [] }],
+    responses: {
+      ...routeErrors(401, 403, 500, 400, 413, 404),
+      '201': {
+        description: 'Success',
+        content: {
+          'application/json': {
+            schema: {
+              type: 'object',
+              properties: { id: { type: 'string' }, token: { type: 'string' } },
+              required: ['id', 'token'],
+            },
+          },
+        },
+      },
+    },
+    parameters: [
+      { name: 'id', in: 'path', required: true, schema: { type: 'string' } },
+    ],
+    operationId: 'postMailboxesIdKeys',
+  }),
+  async (c) => {
+    await findManagedMailbox(c.env, c.get('principal'), c.req.param('id'))
+    const keyId = id(),
+      credential = token()
+    await statement(
+      c.env,
+      'INSERT INTO keys(id,mailbox,hash) VALUES(?,?,?)',
+      keyId,
+      c.req.param('id'),
+      await hash(credential),
+    ).run()
+    return c.json({ id: keyId, token: credential }, 201)
+  },
+)
+
+app.delete(
+  '/mailboxes/:id/keys/:key',
+  describeRoute({
+    summary: 'Revoke one mailbox key',
+    description: 'Requires owner or owning provisioning bearer credential.',
+    security: [{ bearerAuth: [] }],
+    responses: {
+      ...routeErrors(401, 403, 500, 404),
+      '204': { description: 'Success' },
+    },
+    parameters: [
+      { name: 'id', in: 'path', required: true, schema: { type: 'string' } },
+      { name: 'key', in: 'path', required: true, schema: { type: 'string' } },
+    ],
+    operationId: 'deleteMailboxesIdKeysKey',
+  }),
+  async (c) => {
+    await findManagedMailbox(c.env, c.get('principal'), c.req.param('id'))
+    await statement(
+      c.env,
+      'UPDATE keys SET revoked=1 WHERE id=? AND mailbox=?',
+      c.req.param('key'),
+      c.req.param('id'),
+    ).run()
+    return c.body(null, 204)
+  },
+)
+
+app.delete(
+  '/mailboxes/:id',
+  describeRoute({
+    summary: 'Disable mailbox, preserving stored mail and address reservation',
+    description: 'Requires owner or owning provisioning bearer credential.',
+    security: [{ bearerAuth: [] }],
+    responses: {
+      ...routeErrors(401, 403, 500, 404),
+      '204': { description: 'Success' },
+    },
+    parameters: [
+      { name: 'id', in: 'path', required: true, schema: { type: 'string' } },
+    ],
+    operationId: 'deleteMailboxesId',
+  }),
+  async (c) => {
+    await findManagedMailbox(c.env, c.get('principal'), c.req.param('id'))
+    await statement(
+      c.env,
+      'UPDATE mailboxes SET disabled=1 WHERE id=?',
+      c.req.param('id'),
+    ).run()
+    return c.body(null, 204)
+  },
+)
+
+app.get(
+  '/messages',
+  describeRoute({
+    summary: 'Poll metadata in publication order; cursor does not track edits',
+    description: 'Requires mailbox bearer credential.',
+    security: [{ bearerAuth: [] }],
+    responses: {
+      ...routeErrors(401, 403, 500, 400),
+      '200': {
+        description: 'Success',
+        content: {
+          'application/json': {
+            schema: resolver(messageListSchema),
+          },
+        },
+      },
+    },
+    parameters: [
+      {
+        name: 'after',
+        in: 'query',
+        schema: { type: 'integer', minimum: 0, default: 0 },
+      },
+      {
+        name: 'limit',
+        in: 'query',
+        schema: { type: 'integer', minimum: 1, maximum: 100, default: 50 },
+      },
+      {
+        name: 'direction',
+        in: 'query',
+        schema: { enum: ['incoming', 'outgoing'] },
+      },
+      { name: 'unread', in: 'query', schema: { enum: ['true', 'false'] } },
+    ],
+    operationId: 'getMessages',
+  }),
+  async (c) => {
+    const mailboxId = requireMailboxId(c.get('principal'))
+    const after = Number(c.req.query('after') || 0),
+      limit = Number(c.req.query('limit') || 50),
+      direction = c.req.query('direction'),
+      unread = c.req.query('unread')
+    if (
+      !Number.isSafeInteger(after) ||
+      after < 0 ||
+      !Number.isInteger(limit) ||
+      limit < 1 ||
+      limit > 100 ||
+      (direction && !['incoming', 'outgoing'].includes(direction)) ||
+      (unread && !['true', 'false'].includes(unread))
+    )
+      fail(400, 'invalid_query')
+    const rows = await statement(
+      c.env,
+      `SELECT seq,id,direction,status,created,subject,sender,recipient,read,provider_id,error FROM messages WHERE mailbox=? AND seq>? AND status NOT IN ('pending','deleting')${direction ? ' AND direction=?' : ''}${unread ? ' AND read=?' : ''} ORDER BY seq LIMIT ?`,
+      mailboxId,
+      after,
+      ...(direction ? [direction] : []),
+      ...(unread ? [unread === 'true' ? 0 : 1] : []),
+      limit,
+    ).all<MessageSummary>()
+    return c.json({
+      messages: rows.results,
+      nextCursor: rows.results.at(-1)?.seq ?? after,
+    })
+  },
+)
 
 async function findMessage(env: Env, mailboxId: string, messageId: string) {
   const row = await statement(
@@ -429,159 +692,213 @@ async function content(
   return sendSchema.parse(await object.json<unknown>())
 }
 
-app.get('/v1/messages/:id', async (c) => {
-  const message = await findMessage(
-    c.env,
-    requireMailboxId(c.get('principal')),
-    c.req.param('id'),
-  )
-  const parsedContent = await content(c.env, message)
-  return c.json({
-    ...message,
-    object_key: undefined,
-    digest: undefined,
-    request_hash: undefined,
-    content: {
-      ...parsedContent,
-      attachments: parsedContent.attachments?.map(
-        (attachment, attachmentIndex) => ({
-          ...attachment,
-          content: undefined,
-          id: attachmentIndex,
-        }),
-      ),
+app.get(
+  '/messages/:id',
+  describeRoute({
+    summary: 'Read message and parsed content without marking read',
+    description: 'Requires mailbox bearer credential.',
+    security: [{ bearerAuth: [] }],
+    responses: {
+      ...routeErrors(401, 403, 500, 404, 422, 503),
+      '200': {
+        description: 'Success',
+        content: { 'application/json': { schema: resolver(messageDetail) } },
+      },
     },
-  })
-})
+    parameters: [
+      { name: 'id', in: 'path', required: true, schema: { type: 'string' } },
+    ],
+    operationId: 'getMessagesId',
+  }),
+  async (c) => {
+    const message = await findMessage(
+      c.env,
+      requireMailboxId(c.get('principal')),
+      c.req.param('id'),
+    )
+    const parsedContent = await content(c.env, message)
+    return c.json({
+      ...message,
+      object_key: undefined,
+      digest: undefined,
+      request_hash: undefined,
+      content: {
+        ...parsedContent,
+        attachments: parsedContent.attachments?.map(
+          (attachment, attachmentIndex) => ({
+            ...attachment,
+            content: undefined,
+            id: attachmentIndex,
+          }),
+        ),
+      },
+    })
+  },
+)
 
-app.get('/v1/messages/:id/raw', async (c) => {
-  const message = await findMessage(
-    c.env,
-    requireMailboxId(c.get('principal')),
-    c.req.param('id'),
-  )
-  if (message.direction !== 'incoming') fail(404, 'not_found')
-  const object = await c.env.MAIL.get(message.object_key)
-  if (!object) return fail(503, 'content_unavailable')
-  return new Response(object.body, {
-    headers: {
-      'Content-Type': 'application/octet-stream',
-      'Content-Disposition': 'attachment; filename="message.eml"',
-      'Cache-Control': 'no-store',
+app.get(
+  '/messages/:id/raw',
+  describeRoute({
+    summary: 'Download original incoming MIME',
+    description: 'Requires mailbox bearer credential.',
+    security: [{ bearerAuth: [] }],
+    responses: {
+      ...routeErrors(401, 403, 500, 404, 409, 503),
+      '200': {
+        description: 'Binary download',
+        content: {
+          'application/octet-stream': {
+            schema: { type: 'string', format: 'binary' },
+          },
+        },
+      },
     },
-  })
-})
+    parameters: [
+      { name: 'id', in: 'path', required: true, schema: { type: 'string' } },
+    ],
+    operationId: 'getMessagesIdRaw',
+  }),
+  async (c) => {
+    const message = await findMessage(
+      c.env,
+      requireMailboxId(c.get('principal')),
+      c.req.param('id'),
+    )
+    if (message.direction !== 'incoming') fail(404, 'not_found')
+    const object = await c.env.MAIL.get(message.object_key)
+    if (!object) return fail(503, 'content_unavailable')
+    return new Response(object.body, {
+      headers: {
+        'Content-Type': 'application/octet-stream',
+        'Content-Disposition': 'attachment; filename="message.eml"',
+        'Cache-Control': 'no-store',
+      },
+    })
+  },
+)
 
 function attachmentContent(value: string | ArrayBuffer | Uint8Array): string {
   if (typeof value !== 'string') return fail(500, 'internal_error')
   return value
 }
 
-app.get('/v1/messages/:id/attachments/:index', async (c) => {
-  const message = await findMessage(
-    c.env,
-    requireMailboxId(c.get('principal')),
-    c.req.param('id'),
-  )
-  const parsedContent = await content(c.env, message),
-    index = Number(c.req.param('index'))
-  if (
-    !Number.isInteger(index) ||
-    index < 0 ||
-    !parsedContent.attachments?.[index]
-  )
-    fail(404, 'not_found')
-  const attachment = parsedContent.attachments[index]
-  return new Response(
-    Uint8Array.from(atob(attachmentContent(attachment.content)), (x) =>
-      x.charCodeAt(0),
-    ),
-    {
-      headers: {
-        'Content-Type': 'application/octet-stream',
-        'Content-Disposition': 'attachment; filename="attachment"',
-        'Cache-Control': 'no-store',
+app.get(
+  '/messages/:id/attachments/:index',
+  describeRoute({
+    summary: 'Download attachment by zero-based index',
+    description: 'Requires mailbox bearer credential.',
+    security: [{ bearerAuth: [] }],
+    responses: {
+      ...routeErrors(401, 403, 500, 404, 422, 503),
+      '200': {
+        description: 'Binary download',
+        content: {
+          'application/octet-stream': {
+            schema: { type: 'string', format: 'binary' },
+          },
+        },
       },
     },
-  )
-})
+    parameters: [
+      { name: 'id', in: 'path', required: true, schema: { type: 'string' } },
+      { name: 'index', in: 'path', required: true, schema: { type: 'string' } },
+    ],
+    operationId: 'getMessagesIdAttachmentsIndex',
+  }),
+  async (c) => {
+    const message = await findMessage(
+      c.env,
+      requireMailboxId(c.get('principal')),
+      c.req.param('id'),
+    )
+    const parsedContent = await content(c.env, message),
+      index = Number(c.req.param('index'))
+    if (
+      !Number.isInteger(index) ||
+      index < 0 ||
+      !parsedContent.attachments?.[index]
+    )
+      fail(404, 'not_found')
+    const attachment = parsedContent.attachments[index]
+    return new Response(
+      Uint8Array.from(atob(attachmentContent(attachment.content)), (x) =>
+        x.charCodeAt(0),
+      ),
+      {
+        headers: {
+          'Content-Type': 'application/octet-stream',
+          'Content-Disposition': 'attachment; filename="attachment"',
+          'Cache-Control': 'no-store',
+        },
+      },
+    )
+  },
+)
 
-app.patch('/v1/messages/:id', async (c) => {
-  const mailboxId = requireMailboxId(c.get('principal'))
-  await findMessage(c.env, mailboxId, c.req.param('id'))
-  const requestBody = parse(
-    z.object({ read: z.boolean() }),
-    await readJsonBody(c),
-  )
-  await statement(
-    c.env,
-    'UPDATE messages SET read=? WHERE id=? AND mailbox=?',
-    requestBody.read ? 1 : 0,
-    c.req.param('id'),
-    mailboxId,
-  ).run()
-  return c.body(null, 204)
-})
+app.patch(
+  '/messages/:id',
+  describeRoute({
+    summary: 'Set shared read state',
+    description: 'Requires mailbox bearer credential.',
+    security: [{ bearerAuth: [] }],
+    responses: {
+      ...routeErrors(401, 403, 500, 400, 413, 404),
+      '204': { description: 'Success' },
+    },
+    requestBody: {
+      required: true,
+      content: { 'application/json': { schema: resolver(readSchema) } },
+    },
+    parameters: [
+      { name: 'id', in: 'path', required: true, schema: { type: 'string' } },
+    ],
+    operationId: 'patchMessagesId',
+  }),
+  async (c) => {
+    const mailboxId = requireMailboxId(c.get('principal'))
+    await findMessage(c.env, mailboxId, c.req.param('id'))
+    const requestBody = parse(readSchema, await readJsonBody(c))
+    await statement(
+      c.env,
+      'UPDATE messages SET read=? WHERE id=? AND mailbox=?',
+      requestBody.read ? 1 : 0,
+      c.req.param('id'),
+      mailboxId,
+    ).run()
+    return c.body(null, 204)
+  },
+)
 
-app.delete('/v1/messages/:id', async (c) => {
-  const message = await findMessage(
-    c.env,
-    requireMailboxId(c.get('principal')),
-    c.req.param('id'),
-  )
-  await statement(
-    c.env,
-    "UPDATE messages SET status='deleting' WHERE id=?",
-    message.id,
-  ).run()
-  await remove(c.env, message)
-  return c.body(null, 204)
-})
-
-const address = z
-  .string()
-  .email()
-  .max(320)
-  .refine((s) => !/[\r\n]/.test(s))
-const sendSchema = z
-  .object({
-    to: z.array(address).min(1),
-    cc: z.array(address).optional(),
-    bcc: z.array(address).optional(),
-    subject: z
-      .string()
-      .max(998)
-      .refine((s) => !/[\r\n]/.test(s)),
-    text: z.string().optional(),
-    html: z.string().optional(),
-    name: z
-      .string()
-      .max(100)
-      .refine((s) => !/[\r\n]/.test(s))
-      .optional(),
-    attachments: z
-      .array(
-        z.object({
-          filename: z
-            .string()
-            .min(1)
-            .max(255)
-            .refine((s) => !/[\r\n]/.test(s)),
-          type: z
-            .string()
-            .max(100)
-            .refine((s) => !/[\r\n]/.test(s)),
-          content: z
-            .string()
-            .regex(
-              /^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$/,
-            ),
-        }),
-      )
-      .max(32)
-      .optional(),
-  })
-  .refine((b) => !!(b.text || b.html))
+app.delete(
+  '/messages/:id',
+  describeRoute({
+    summary: 'Permanently delete message and idempotency record',
+    description: 'Requires mailbox bearer credential.',
+    security: [{ bearerAuth: [] }],
+    responses: {
+      ...routeErrors(401, 403, 500, 404),
+      '204': { description: 'Success' },
+    },
+    parameters: [
+      { name: 'id', in: 'path', required: true, schema: { type: 'string' } },
+    ],
+    operationId: 'deleteMessagesId',
+  }),
+  async (c) => {
+    const message = await findMessage(
+      c.env,
+      requireMailboxId(c.get('principal')),
+      c.req.param('id'),
+    )
+    await statement(
+      c.env,
+      "UPDATE messages SET status='deleting' WHERE id=?",
+      message.id,
+    ).run()
+    await remove(c.env, message)
+    return c.body(null, 204)
+  },
+)
 
 async function send(c: AppContext, reply?: MessageRow): Promise<Response> {
   const env = c.env,
@@ -782,17 +1099,96 @@ async function send(c: AppContext, reply?: MessageRow): Promise<Response> {
   )
 }
 
-app.post('/v1/send', (c) => send(c))
+app.post(
+  '/send',
+  describeRoute({
+    summary: 'Submit email without automatic resend',
+    description: 'Requires mailbox bearer credential.',
+    security: [{ bearerAuth: [] }],
+    responses: {
+      ...routeErrors(401, 403, 500, 400, 413, 409, 429, 503),
+      502: {
+        description:
+          'Provider rejection or uncertain outcome; never automatically resend',
+        content: { 'application/json': { schema: resolver(sendResult) } },
+      },
+      '201': {
+        description: 'Success',
+        content: { 'application/json': { schema: resolver(sendResult) } },
+      },
+      '200': {
+        description: 'Existing attempt',
+        content: { 'application/json': { schema: resolver(sendResult) } },
+      },
+    },
+    requestBody: {
+      required: true,
+      content: { 'application/json': { schema: resolver(sendSchema) } },
+    },
+    parameters: [
+      {
+        name: 'Idempotency-Key',
+        in: 'header',
+        required: true,
+        schema: { type: 'string', minLength: 1, maxLength: 200 },
+        description:
+          'Reuse the same key and content for retries. Protection ends when message is deleted or expired.',
+      },
+    ],
+    operationId: 'postSend',
+  }),
+  (c) => send(c),
+)
 
-app.post('/v1/messages/:id/reply', async (c) => {
-  const message = await findMessage(
-    c.env,
-    requireMailboxId(c.get('principal')),
-    c.req.param('id'),
-  )
-  if (message.direction !== 'incoming') fail(400, 'incoming_required')
-  return send(c, message)
-})
+app.post(
+  '/messages/:id/reply',
+  describeRoute({
+    summary: 'Submit email without automatic resend',
+    description: 'Requires mailbox bearer credential.',
+    security: [{ bearerAuth: [] }],
+    responses: {
+      ...routeErrors(401, 403, 500, 400, 413, 404, 409, 429, 503),
+      502: {
+        description:
+          'Provider rejection or uncertain outcome; never automatically resend',
+        content: { 'application/json': { schema: resolver(sendResult) } },
+      },
+      '201': {
+        description: 'Success',
+        content: { 'application/json': { schema: resolver(sendResult) } },
+      },
+      '200': {
+        description: 'Existing attempt',
+        content: { 'application/json': { schema: resolver(sendResult) } },
+      },
+    },
+    requestBody: {
+      required: true,
+      content: { 'application/json': { schema: resolver(replySchema) } },
+    },
+    parameters: [
+      { name: 'id', in: 'path', required: true, schema: { type: 'string' } },
+      {
+        name: 'Idempotency-Key',
+        in: 'header',
+        required: true,
+        schema: { type: 'string', minLength: 1, maxLength: 200 },
+        description:
+          'Reuse the same key and content for retries. Protection ends when message is deleted or expired.',
+      },
+    ],
+    operationId: 'postMessagesIdReply',
+  }),
+  async (c) => {
+    const message = await findMessage(
+      c.env,
+      requireMailboxId(c.get('principal')),
+      c.req.param('id'),
+    )
+    if (message.direction !== 'incoming') fail(400, 'incoming_required')
+    return send(c, message)
+  },
+)
 
 async function remove(env: Env, record: MessageRow) {
   await env.MAIL.delete([record.object_key, `${record.object_key}/parsed`])
@@ -903,3 +1299,19 @@ export default {
   scheduled: (_: ScheduledController, env: Env, ctx: ExecutionContext) =>
     ctx.waitUntil(cleanup(env)),
 } satisfies ExportedHandler<Env>
+
+app.get(
+  '/openapi.json',
+  openAPIRouteHandler(app, {
+    documentation: {
+      openapi: '3.1.0',
+      info: {
+        title: 'AgentMailer',
+        version: '0.1.0',
+        description: 'Self-hosted email for AI agents',
+      },
+      servers: [{ url: '/' }],
+      components: { securitySchemes },
+    },
+  }),
+)

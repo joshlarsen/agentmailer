@@ -23,7 +23,7 @@ outside the current v1 scope unless requested.
 - `test/tsconfig.json`: Editor-discoverable test project with Cloudflare runtime
   and Vitest types. Keep its configuration aligned with `npm run check`.
 - `test/setup.test.mjs`: Setup command tests using a fake Wrangler executable.
-- `docs/openapi.json`: Public API contract; maintained directly.
+- `src/api.ts`: Shared API schemas; route metadata generates `/openapi.json`.
 - `skills/agentmailer/SKILL.md`: Instructions for agents using the service.
 - `README.md`: Deployment, operations, limitations, and usage examples.
 
@@ -159,7 +159,7 @@ Existing shortcuts are not precedents; unrelated cleanup is unnecessary.
 
 ## Changes and verification
 
-Update the OpenAPI spec when changing API behavior, and update the README and
+Update shared schemas and route metadata when changing API behavior, and update the README and
 agent skill when their workflows change. Preserve stable error codes and
 document intentional compatibility changes.
 

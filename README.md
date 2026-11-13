@@ -30,28 +30,30 @@ Receive-only configuration omits `send_email`. `npm run deploy` alone requires a
 Set `BASE` to the deployed HTTPS URL and set `OWNER_TOKEN` privately in your shell. Avoid shell tracing and storing credentials in scripts.
 
 ```sh
-curl "$BASE/v1/admin/agents" -H "Authorization: Bearer $OWNER_TOKEN" \
+curl "$BASE/agents" -H "Authorization: Bearer $OWNER_TOKEN" \
   -H 'Content-Type: application/json' -d '{"name":"assistant","mailboxLimit":10,"dailyLimit":100}'
 ```
 
 Save the returned provisioning `token` as `AGENT_TOKEN`. It manages only its own mailboxes and their keys, and cannot read or send mail directly.
 
 ```sh
-curl "$BASE/v1/mailboxes" -H "Authorization: Bearer $AGENT_TOKEN" \
+curl "$BASE/mailboxes" -H "Authorization: Bearer $AGENT_TOKEN" \
   -H 'Content-Type: application/json' -d '{"name":"assistant"}'
 ```
 
 Save the returned `token` as `MAILBOX_TOKEN`. Keys are returned once and stored only as hashes. The response also includes mailbox `id`, `address`, and `keyId`. If creation was interrupted after the mailbox was inserted, list mailboxes and issue a replacement key using its ID.
 
 ```sh
-curl "$BASE/v1/messages?after=0&limit=50" -H "Authorization: Bearer $MAILBOX_TOKEN"
-curl "$BASE/v1/messages/MESSAGE_ID" -H "Authorization: Bearer $MAILBOX_TOKEN"
-curl "$BASE/v1/send" -H "Authorization: Bearer $MAILBOX_TOKEN" \
+curl "$BASE/messages?after=0&limit=50" -H "Authorization: Bearer $MAILBOX_TOKEN"
+curl "$BASE/messages/MESSAGE_ID" -H "Authorization: Bearer $MAILBOX_TOKEN"
+curl "$BASE/send" -H "Authorization: Bearer $MAILBOX_TOKEN" \
   -H 'Content-Type: application/json' -H 'Idempotency-Key: task-123-message-1' \
   -d '{"to":["person@example.net"],"subject":"Task update","text":"The task is complete."}'
 ```
 
-All endpoints and request fields are specified in [OpenAPI](docs/openapi.json). Install [the agent skill](skills/agentmailer/SKILL.md) in your agent's skill directory and provide its base URL and credentials through your secret manager.
+API routes have no version or administration prefix. Upgrading from the previous URLs requires changing `/v1/admin/agents` to `/agents` and removing `/v1` from other calls; old URLs return 404.
+
+All endpoints and request fields are specified in OpenAPI at `GET $BASE/openapi.json`, available without credentials and generated from the deployed routes and shared schemas. Install [the agent skill](skills/agentmailer/SKILL.md) in your agent's skill directory and provide its base URL and credentials through your secret manager.
 
 Polling returns metadata in ascending sequence order. Follow `nextCursor` until empty, then wait at least 60 seconds with backoff. Persist the cursor only after processing the page; make processing safe to repeat. Read state is shared per mailbox and changes only through PATCH. Prefer polling without filters to avoid missing later read-state changes. The cursor tracks publication, not modifications; this is not a change feed.
 
@@ -92,6 +94,6 @@ Local dev uses isolated local D1/R2. Receive-only is the checked-in default; sen
 
 ## Export and recovery
 
-Export metadata with `npx wrangler d1 export DATABASE_NAME --remote --output backup.sql --config wrangler.deploy.json`. Export the private bucket with an S3-compatible tool such as rclone using separately issued, least-privilege R2 credentials. Export both together during a maintenance window for consistency; message rows reference R2 keys. Backups contain sensitive mail and hashed credentials. Restore D1 and R2 into a deployment with the same domain and bindings, then issue fresh credentials and verify routing. Rotate the owner token with `npx wrangler secret put OWNER_TOKEN --config wrangler.deploy.json`. Rotate mailbox keys by issuing a replacement, switching the agent, then deleting the old key. Disabled provisioning identities cannot be reenabled in v1; create a new identity.
+Export metadata with `npx wrangler d1 export DATABASE_NAME --remote --output backup.sql --config wrangler.deploy.json`. Export the private bucket with an S3-compatible tool such as rclone using separately issued, least-privilege R2 credentials. Export both together during a maintenance window for consistency; message rows reference R2 keys. Backups contain sensitive mail and hashed credentials. Restore D1 and R2 into a deployment with the same domain and bindings, then issue fresh credentials and verify routing. Rotate the owner token with `npx wrangler secret put OWNER_TOKEN --config wrangler.deploy.json`. Rotate mailbox keys by issuing a replacement, switching the agent, then deleting the old key. Disabled provisioning identities cannot be reenabled; create a new identity.
 
 This service does not include webmail, full-text search, IMAP/POP, campaigns, forwarding, automatic replies, delivery/bounce tracking, or webhook delivery.

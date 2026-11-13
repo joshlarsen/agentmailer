@@ -26,11 +26,11 @@ beforeAll(async () => {
     migration.replace(/--[^\n]*/g, '').replace(/\n/g, ' '),
   )
   agent = await json(
-    await call('/v1/admin/agents', 'test-owner', { name: 'faults' }),
+    await call('/agents', 'test-owner', { name: 'faults' }),
     credentialSchema,
   )
   mailbox = await json(
-    await call('/v1/mailboxes', agent.token, { name: 'faults' }),
+    await call('/mailboxes', agent.token, { name: 'faults' }),
     mailboxCredentialSchema,
   )
 })
@@ -42,12 +42,12 @@ it('never resends after a provider timeout, including concurrent retries', async
   const bindings = { ...environment, EMAIL: { send } }
   const headers = { 'Idempotency-Key': 'timeout' }
   const responses = await Promise.all([
-    call('/v1/send', mailbox.token, payload, 'POST', bindings, headers),
-    call('/v1/send', mailbox.token, payload, 'POST', bindings, headers),
+    call('/send', mailbox.token, payload, 'POST', bindings, headers),
+    call('/send', mailbox.token, payload, 'POST', bindings, headers),
   ])
   expect(send).toHaveBeenCalledOnce()
   const retry = await json(
-    await call('/v1/send', mailbox.token, payload, 'POST', bindings, headers),
+    await call('/send', mailbox.token, payload, 'POST', bindings, headers),
     attemptSchema,
   )
   expect(retry.status).toBe('uncertain')
@@ -61,7 +61,7 @@ it('records known provider rejection', async () => {
   )
   const response = await json(
     await call(
-      '/v1/send',
+      '/send',
       mailbox.token,
       payload,
       'POST',
@@ -86,12 +86,12 @@ it('retains uncertainty when persisting provider acceptance fails', async () => 
   const bindings = { ...environment, EMAIL: { send }, DB: faultyDB }
   const headers = { 'Idempotency-Key': 'acceptance-write-failure' }
   expect(
-    (await call('/v1/send', mailbox.token, payload, 'POST', bindings, headers))
+    (await call('/send', mailbox.token, payload, 'POST', bindings, headers))
       .status,
   ).toBe(500)
   const retry = await json(
     await call(
-      '/v1/send',
+      '/send',
       mailbox.token,
       payload,
       'POST',
@@ -119,18 +119,18 @@ it('exposes raw and multipart attachment downloads and threads replies', async (
     environment,
   )
   const list = await json(
-    await call('/v1/messages?direction=incoming', mailbox.token),
+    await call('/messages?direction=incoming', mailbox.token),
     listSchema,
   )
   const messageId = list.messages[0].id
   const detail = await json(
-    await call('/v1/messages/' + messageId, mailbox.token),
+    await call('/messages/' + messageId, mailbox.token),
     detailSchema,
   )
   expect(detail.content.text).toContain('✓')
   expect(detail.content.attachments[0].content).toBeUndefined()
   const attachment = await call(
-    `/v1/messages/${messageId}/attachments/0`,
+    `/messages/${messageId}/attachments/0`,
     mailbox.token,
   )
   expect(new TextDecoder().decode(await attachment.arrayBuffer())).toBe('hello')
@@ -138,7 +138,7 @@ it('exposes raw and multipart attachment downloads and threads replies', async (
   expect(
     (
       await call(
-        `/v1/messages/${messageId}/reply`,
+        `/messages/${messageId}/reply`,
         mailbox.token,
         { text: 'Response' },
         'POST',
@@ -196,7 +196,7 @@ it('recovers raw content after a failed publication write', async () => {
 })
 
 it('retries deletion and preserves cursor monotonicity after deleting all messages', async () => {
-  const list = await json(await call('/v1/messages', mailbox.token), listSchema)
+  const list = await json(await call('/messages', mailbox.token), listSchema)
   const before = list.nextCursor
   const message = list.messages[0]
   const bad = {
@@ -208,7 +208,7 @@ it('retries deletion and preserves cursor monotonicity after deleting all messag
   expect(
     (
       await call(
-        '/v1/messages/' + message.id,
+        '/messages/' + message.id,
         mailbox.token,
         undefined,
         'DELETE',
@@ -216,7 +216,7 @@ it('retries deletion and preserves cursor monotonicity after deleting all messag
       )
     ).status,
   ).toBe(500)
-  expect((await call('/v1/messages/' + message.id, mailbox.token)).status).toBe(
+  expect((await call('/messages/' + message.id, mailbox.token)).status).toBe(
     404,
   )
   await cleanup(environment)
@@ -229,7 +229,7 @@ it('retries deletion and preserves cursor monotonicity after deleting all messag
   await cleanup({ ...environment, RETENTION_DAYS: '1' })
   const send = mockSend().mockResolvedValue({ messageId: 'after-deletion' })
   await call(
-    '/v1/send',
+    '/send',
     mailbox.token,
     payload,
     'POST',
@@ -237,7 +237,7 @@ it('retries deletion and preserves cursor monotonicity after deleting all messag
     { 'Idempotency-Key': 'after-deletion' },
   )
   const after = await json(
-    await call(`/v1/messages?after=${before}`, mailbox.token),
+    await call(`/messages?after=${before}`, mailbox.token),
     listSchema,
   )
   expect(after.messages).toHaveLength(1)
@@ -246,21 +246,21 @@ it('retries deletion and preserves cursor monotonicity after deleting all messag
 
 it('revokes only the selected mailbox credential', async () => {
   const replacement = await json(
-    await call(`/v1/mailboxes/${mailbox.id}/keys`, agent.token, {}, 'POST'),
+    await call(`/mailboxes/${mailbox.id}/keys`, agent.token, {}, 'POST'),
     credentialSchema,
   )
   await call(
-    `/v1/mailboxes/${mailbox.id}/keys/${mailbox.keyId}`,
+    `/mailboxes/${mailbox.id}/keys/${mailbox.keyId}`,
     agent.token,
     undefined,
     'DELETE',
   )
-  expect((await call('/v1/messages', mailbox.token)).status).toBe(401)
-  expect((await call('/v1/messages', replacement.token)).status).toBe(200)
+  expect((await call('/messages', mailbox.token)).status).toBe(401)
+  expect((await call('/messages', replacement.token)).status).toBe(200)
 })
 
 it('translates address collisions without hiding database failures', async () => {
-  const duplicate = await call('/v1/mailboxes', agent.token, {
+  const duplicate = await call('/mailboxes', agent.token, {
     name: 'faults',
   })
   expect(duplicate.status).toBe(409)
@@ -274,7 +274,7 @@ it('translates address collisions without hiding database failures', async () =>
     },
   )
   const failed = await call(
-    '/v1/mailboxes',
+    '/mailboxes',
     agent.token,
     { name: 'unavailable' },
     'POST',
@@ -303,10 +303,10 @@ it('keeps cache storage failures separate from MIME parsing failures', async () 
     throw new Error('R2 unavailable')
   })
   const response = await call(
-    `/v1/messages/${row.id}`,
+    `/messages/${row.id}`,
     (
       await json(
-        await call(`/v1/mailboxes/${mailbox.id}/keys`, agent.token, {}),
+        await call(`/mailboxes/${mailbox.id}/keys`, agent.token, {}),
         credentialSchema,
       )
     ).token,
@@ -336,11 +336,11 @@ it('recognizes idempotency hashes persisted before the type cleanup', async () =
     .bind(mailbox.id, Date.now(), requestHash)
     .run()
   const credential = await json(
-    await call(`/v1/mailboxes/${mailbox.id}/keys`, agent.token, {}),
+    await call(`/mailboxes/${mailbox.id}/keys`, agent.token, {}),
     credentialSchema,
   )
   const response = await call(
-    '/v1/send',
+    '/send',
     credential.token,
     payload,
     'POST',

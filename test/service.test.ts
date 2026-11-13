@@ -1,3 +1,4 @@
+import { createExecutionContext } from 'cloudflare:test'
 import { beforeAll, expect, it, vi } from 'vitest'
 
 import migration from '../migrations/0001.sql?raw'
@@ -32,7 +33,7 @@ beforeAll(async () => {
     migration.replace(/--[^\n]*/g, '').replace(/\n/g, ' '),
   )
   agent = await json(
-    await call('/v1/admin/agents', 'test-owner', {
+    await call('/agents', 'test-owner', {
       name: 'test',
       mailboxLimit: 2,
       dailyLimit: 2,
@@ -40,20 +41,60 @@ beforeAll(async () => {
     credentialSchema,
   )
   mailbox = await json(
-    await call('/v1/mailboxes', agent.token, { name: 'alpha' }),
+    await call('/mailboxes', agent.token, { name: 'alpha' }),
     mailboxCredentialSchema,
   )
 })
 
+it('preserves JSON, body-size, query and send validation errors', async () => {
+  for (const [body, status, code] of [
+    ['{', 400, 'invalid_json'],
+    ['{}', 400, 'invalid_request'],
+    [' '.repeat(8 * 1024 * 1024 + 1), 413, 'too_large'],
+  ] as const) {
+    const response = await worker.fetch(
+      new Request('https://mail.test/agents', {
+        method: 'POST',
+        headers: { Authorization: 'Bearer test-owner' },
+        body,
+      }),
+      environment,
+      createExecutionContext(),
+    )
+    expect(response.status).toBe(status)
+    expect(await response.json()).toEqual({ error: { code } })
+  }
+  const query = await call('/messages?limit=101', mailbox.token)
+  expect(query.status).toBe(400)
+  expect(await query.json()).toEqual({ error: { code: 'invalid_query' } })
+  const send = mockSend()
+  for (const payload of [
+    { to: ['human@example.net'], subject: 'Missing body' },
+    { to: ['human@example.net'], subject: 'Invalid\r\nsubject', text: 'body' },
+  ]) {
+    const response = await request(
+      '/send',
+      mailbox.token,
+      payload,
+      'POST',
+      { ...environment, EMAIL: { send } },
+      { 'Idempotency-Key': 'invalid' },
+    )
+    expect(response.status).toBe(400)
+    expect(await response.json()).toEqual({
+      error: { code: 'invalid_request' },
+    })
+  }
+  expect(send).not.toHaveBeenCalled()
+})
+
 it('isolates roles and atomically limits mailbox creation', async () => {
-  expect((await call('/v1/messages', agent.token)).status).toBe(403)
+  expect((await call('/messages', agent.token)).status).toBe(403)
   const results = await Promise.all(
-    ['beta', 'gamma'].map((name) =>
-      call('/v1/mailboxes', agent.token, { name }),
-    ),
+    ['beta', 'gamma'].map((name) => call('/mailboxes', agent.token, { name })),
   )
   expect(results.map((message) => message.status).sort()).toEqual([201, 429])
-  expect((await call('/v1/admin/agents', mailbox.token)).status).toBe(403)
+  expect((await call('/agents', mailbox.token)).status).toBe(403)
 })
 
 it('stores, deduplicates, parses, polls and deletes MIME', async () => {
@@ -72,16 +113,13 @@ it('stores, deduplicates, parses, polls and deletes MIME', async () => {
 
   await worker.email(incoming(), environment)
   await worker.email(incoming(), environment)
-  const inbox = await json(
-    await call('/v1/messages', mailbox.token),
-    listSchema,
-  )
+  const inbox = await json(await call('/messages', mailbox.token), listSchema)
   expect(inbox.messages).toHaveLength(1)
   const messageId = inbox.messages[0].id
   expect(
     (
       await json(
-        await call('/v1/messages/' + messageId, mailbox.token),
+        await call('/messages/' + messageId, mailbox.token),
         detailSchema,
       )
     ).content.text,
@@ -89,25 +127,23 @@ it('stores, deduplicates, parses, polls and deletes MIME', async () => {
   expect(
     new TextDecoder().decode(
       await (
-        await call(`/v1/messages/${messageId}/raw`, mailbox.token)
+        await call(`/messages/${messageId}/raw`, mailbox.token)
       ).arrayBuffer(),
     ),
   ).toBe(raw)
   const other = await json(
-    await call('/v1/admin/agents', 'test-owner', { name: 'other' }),
+    await call('/agents', 'test-owner', { name: 'other' }),
     credentialSchema,
   )
   const otherbox = await json(
-    await call('/v1/mailboxes', other.token, { name: 'other' }),
+    await call('/mailboxes', other.token, { name: 'other' }),
     mailboxCredentialSchema,
   )
-  expect((await call('/v1/messages/' + messageId, otherbox.token)).status).toBe(
+  expect((await call('/messages/' + messageId, otherbox.token)).status).toBe(
     404,
   )
-  await call('/v1/messages/' + messageId, mailbox.token, undefined, 'DELETE')
-  expect((await call('/v1/messages/' + messageId, mailbox.token)).status).toBe(
-    404,
-  )
+  await call('/messages/' + messageId, mailbox.token, undefined, 'DELETE')
+  expect((await call('/messages/' + messageId, mailbox.token)).status).toBe(404)
 })
 
 it('rejects unknown recipients and oversized email', async () => {
@@ -133,20 +169,20 @@ it('sends idempotently, detects conflicts and applies quota', async () => {
     text: 'world',
   }
   const first = await json(
-    await call('/v1/send', mailbox.token, sendInput, 'POST', {
+    await call('/send', mailbox.token, sendInput, 'POST', {
       'Idempotency-Key': 'one',
     }),
     attemptSchema,
   )
   expect(first.status).toBe('accepted')
-  await call('/v1/send', mailbox.token, sendInput, 'POST', {
+  await call('/send', mailbox.token, sendInput, 'POST', {
     'Idempotency-Key': 'one',
   })
   expect(send).toHaveBeenCalledOnce()
   expect(
     (
       await call(
-        '/v1/send',
+        '/send',
         mailbox.token,
         { ...sendInput, text: 'changed' },
         'POST',
@@ -158,7 +194,7 @@ it('sends idempotently, detects conflicts and applies quota', async () => {
   ).toBe(409)
   const results = await Promise.all(
     ['two', 'three'].map((k) =>
-      call('/v1/send', mailbox.token, sendInput, 'POST', {
+      call('/send', mailbox.token, sendInput, 'POST', {
         'Idempotency-Key': k,
       }),
     ),
@@ -174,20 +210,17 @@ it('recovers pending raw storage without losing polling visibility', async () =>
     .bind(mailbox.id)
     .run()
   await environment.MAIL.put('recover', 'hello')
-  const before = await json(
-    await call('/v1/messages', mailbox.token),
-    listSchema,
-  )
+  const before = await json(await call('/messages', mailbox.token), listSchema)
   await cleanup(environment)
   const after = await json(
-    await call(`/v1/messages?after=${before.nextCursor}`, mailbox.token),
+    await call(`/messages?after=${before.nextCursor}`, mailbox.token),
     listSchema,
   )
   expect(after.messages.some((message) => message.id === 'recover')).toBe(true)
 })
 
 it('disabling an agent revokes descendant access', async () => {
-  await call('/v1/admin/agents/' + agent.id, 'test-owner', undefined, 'DELETE')
-  expect((await call('/v1/messages', mailbox.token)).status).toBe(401)
-  expect((await call('/v1/mailboxes', agent.token)).status).toBe(401)
+  await call('/agents/' + agent.id, 'test-owner', undefined, 'DELETE')
+  expect((await call('/messages', mailbox.token)).status).toBe(401)
+  expect((await call('/mailboxes', agent.token)).status).toBe(401)
 })
