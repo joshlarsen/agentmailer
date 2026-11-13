@@ -2,21 +2,21 @@
   "name": "agentmailer",
   "version": "0.1.0",
   "private": true,
-  "description": "Self-hosted email for AI agents on Cloudflare",
+  "description": "Self-hosted email for AI agents",
   "license": "MIT",
   "type": "module",
   "scripts": {
-    "dev": "wrangler dev",
     "check": "tsc && tsc -p test/tsconfig.json",
-    "test": "vitest run && node --test test/setup.test.mjs",
-    "setup": "node scripts/setup.mjs",
     "deploy": "wrangler deploy --config wrangler.deploy.json",
-    "upgrade": "node scripts/setup.mjs --upgrade",
+    "dev": "wrangler dev",
     "doctor": "node scripts/setup.mjs --doctor",
     "format": "oxfmt --write .",
+    "format:check": "oxfmt --check .",
     "lint": "oxlint --deny-warnings .",
     "lint:fix": "oxlint --deny-warnings --fix .",
-    "format:check": "oxfmt --check ."
+    "setup": "node scripts/setup.mjs",
+    "test": "vitest run && node --test test/setup.test.mjs",
+    "upgrade": "node scripts/setup.mjs --upgrade"
   },
   "dependencies": {
     "hono": "^4.13.18",
