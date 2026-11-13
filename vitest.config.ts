@@ -1,5 +1,5 @@
-import { defineConfig } from "vitest/config";
-import { cloudflareTest } from "@cloudflare/vitest-plugin";
+import { defineConfig } from "vitest/config"
+import { cloudflareTest } from "@cloudflare/vitest-plugin"
 export default defineConfig({
   test: { include: ["test/**/*.test.ts"] },
   plugins: [
@@ -8,4 +8,4 @@ export default defineConfig({
       miniflare: { bindings: { OWNER_TOKEN: "test-owner" } },
     }),
   ],
-});
+})

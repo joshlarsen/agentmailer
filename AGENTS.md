@@ -33,15 +33,24 @@ Use Node 24 or later and npm; CI uses Node 24. Install with `npm ci` and keep
 For implementation changes, run:
 
 ```sh
+npm run format:check
+npm run lint
 npm run check
 npm test
 npx wrangler deploy --dry-run
 ```
 
-Format changed TypeScript, JavaScript, JSON, or Markdown files with Prettier.
-`npm run format` formats the configured source, tests, scripts, and API spec;
-it does not format SQL. For documentation-only changes, review the rendered
-structure and referenced commands instead of running the full runtime suite.
+Use Oxfmt for formatting supported source, configuration, and documentation
+files. Run `npm run format` to apply formatting and `npm run format:check` to
+check it without writing files. TypeScript and JavaScript use no trailing
+semicolons, two-space indentation, double quotes, and an 80-column print width.
+SQL is not formatted by Oxfmt.
+
+Run `npm run lint` for Oxlint correctness checks and the project's explicit
+type-safety rules. `npm run lint:fix` applies safe automatic fixes. Formatting
+and lint checks run in CI. For documentation-only changes, check formatting
+and review the rendered structure and commands instead of running the runtime
+suite.
 
 For local development, follow the README's `.dev.vars` and local migration
 steps, then run `npm run dev`. The checked-in Wrangler configuration is
@@ -113,7 +122,7 @@ Existing shortcuts are not precedents; unrelated cleanup is unnecessary.
 - Extract cohesive operations when doing so clarifies intent, isolates an
   invariant, or removes meaningful duplication. Avoid arbitrary function-length
   limits and abstractions created solely to shorten files.
-- Use Prettier for formatting rather than maintaining separate spacing rules.
+- Use Oxfmt for formatting rather than maintaining separate spacing rules.
 
 ## Invariants to preserve
 

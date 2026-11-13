@@ -4,13 +4,16 @@
   "description": "Self-hosted email for AI agents on Cloudflare",
   "scripts": {
     "dev": "wrangler dev",
-    "check": "tsc",
+    "check": "tsc && tsc -p tsconfig.test.json",
     "test": "vitest run && node --test test/setup.test.mjs",
     "setup": "node scripts/setup.mjs",
     "deploy": "wrangler deploy --config wrangler.deploy.json",
     "upgrade": "node scripts/setup.mjs --upgrade",
     "doctor": "node scripts/setup.mjs --doctor",
-    "format": "prettier --write src test scripts vitest.config.ts docs/openapi.json"
+    "format": "oxfmt --write .",
+    "lint": "oxlint --deny-warnings .",
+    "lint:fix": "oxlint --deny-warnings --fix .",
+    "format:check": "oxfmt --check ."
   },
   "license": "MIT",
   "type": "module",
@@ -22,7 +25,8 @@
   "devDependencies": {
     "@cloudflare/vitest-plugin": "^1.8.1",
     "@cloudflare/workers-types": "^5.20261113.1",
-    "prettier": "^3.10.1",
+    "oxfmt": "^0.78.0",
+    "oxlint": "^1.93.0",
     "typescript": "^7.0.2",
     "vitest": "^5.1.0",
     "wrangler": "^4.161.0"

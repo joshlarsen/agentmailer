@@ -12,7 +12,7 @@ npm ci
 npm run setup
 ```
 
-The wizard logs into Wrangler, asks for your account ID and mail domain, creates D1/R2, applies migrations, installs an owner secret, and deploys. Save the displayed owner token in a password manager. It is not saved locally. `.deployment.json` and `wrangler.deploy.json` hold deployment state and are gitignored. Preserve them to resume setup and upgrade; rerunning setup reuses resources. If interrupted while creating a bucket, verify ownership before allowing reuse. Setup does not change DNS or routing rules.
+The wizard logs into Wrangler, asks for your account ID and mail domain, creates D1/R2, applies migrations, installs an owner secret, and deploys. Save the displayed owner token in a password manager. It is not saved locally. `.deployment.json` and `wrangler.deploy.json` hold deployment state and are gitignored. Preserve them to resume setup and upgrade; rerunning setup reuses resources. If interrupted while creating a bucket, verify ownership before allowing reuse. Saved settings and Wrangler JSON responses are validated before use, and resume state is saved atomically. Invalid state stops setup rather than starting a new deployment. Setup does not change DNS or routing rules.
 
 In Cloudflare Email Service:
 
@@ -21,7 +21,7 @@ In Cloudflare Email Service:
 3. For sending, enable Workers Paid and onboard the same domain in Email Sending; complete DNS verification.
 4. Visit the Worker URL printed by Wrangler at `/health`. Create a mailbox below, send it an external test email, and verify receipt. If sending is enabled, send and reply to an external address and verify threading and attachments.
 
-`npm run doctor` checks account authentication and database access; it also lists the remaining dashboard checks. `npm run upgrade` reuses saved configuration and applies migrations before redeploying. Local state is the source of truth for wizard-generated config. Change `.deployment.json` retention or sending settings before rerunning setup. For custom settings edit generated config and use `npm run deploy` directly.
+`npm run doctor` checks account authentication and database access; it also lists the remaining dashboard checks. `npm run upgrade` requires saved deployment settings, reuses existing resources, and applies migrations before redeploying. Local state is the source of truth for wizard-generated config. Change `.deployment.json` retention or sending settings before rerunning setup. For custom settings edit generated config and use `npm run deploy` directly.
 
 Receive-only configuration omits `send_email`. `npm run deploy` alone requires a generated deployment configuration. No production resources are created during tests or build checks.
 
@@ -79,10 +79,14 @@ Email Routing itself is free. Worker execution, D1, R2 storage and operations ha
 printf 'OWNER_TOKEN=local-development-only\n' > .dev.vars
 npx wrangler d1 migrations apply agentmailer --local
 npm run dev
+npm run format:check
+npm run lint
 npm run check
 npm test
 npx wrangler deploy --dry-run
 ```
+
+Use `npm run format` to apply Oxfmt formatting (including semicolon-free TypeScript and JavaScript), and `npm run lint:fix` for safe Oxlint fixes. CI checks formatting and linting alongside types and tests.
 
 Local dev uses isolated local D1/R2. Receive-only is the checked-in default; sending tests use a mock binding. Runtime tests run inside workerd with real local D1/R2. Live deployment, delivery, DNS, and Free-plan CPU validation require a Cloudflare account and external mailbox; local tests do not establish these guarantees.
 
