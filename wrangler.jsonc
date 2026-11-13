@@ -1,0 +1,21 @@
+{
+  "name": "agentmailer",
+  "main": "src/index.ts",
+  "compatibility_date": "2026-11-13",
+  "vars": {
+    "MAIL_DOMAIN": "agents.example.com",
+    "RETENTION_DAYS": "0",
+    "MAILBOX_LIMIT": "10",
+    "DAILY_LIMIT": "100",
+  },
+  "d1_databases": [
+    {
+      "binding": "DB",
+      "database_name": "agentmailer",
+      "database_id": "local-placeholder",
+      "migrations_dir": "migrations",
+    },
+  ],
+  "r2_buckets": [{ "binding": "MAIL", "bucket_name": "agentmailer" }],
+  "triggers": { "crons": ["*/15 * * * *"] },
+}

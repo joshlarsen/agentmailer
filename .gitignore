@@ -1,0 +1,7 @@
+node_modules/
+.wrangler/
+.dev.vars
+.deployment.json
+wrangler.deploy.json
+coverage/
+docs/planning/
