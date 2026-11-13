@@ -20,6 +20,7 @@ import {
 } from './helpers'
 const call = request
 let agent: Credential, mailbox: MailboxCredential
+
 beforeAll(async () => {
   await environment.DB.exec(
     migration.replace(/--[^\n]*/g, '').replace(/\n/g, ' '),
@@ -33,7 +34,9 @@ beforeAll(async () => {
     mailboxCredentialSchema,
   )
 })
+
 const payload = { to: ['human@example.net'], subject: 'Status', text: 'Hello' }
+
 it('never resends after a provider timeout, including concurrent retries', async () => {
   const send = mockSend().mockRejectedValue(new Error('timeout'))
   const bindings = { ...environment, EMAIL: { send } }
@@ -51,6 +54,7 @@ it('never resends after a provider timeout, including concurrent retries', async
   expect(responses.some((message) => message.status === 502)).toBe(true)
   expect(send).toHaveBeenCalledOnce()
 })
+
 it('records known provider rejection', async () => {
   const send = mockSend().mockRejectedValue(
     Object.assign(new Error('rejected'), { code: 'E_RECIPIENT_SUPPRESSED' }),
@@ -68,6 +72,7 @@ it('records known provider rejection', async () => {
   )
   expect(response.status).toBe('failed')
 })
+
 it('retains uncertainty when persisting provider acceptance fails', async () => {
   const send = mockSend().mockResolvedValue({ messageId: 'accepted' })
   const faultyDB = overrideMethod(
@@ -98,6 +103,7 @@ it('retains uncertainty when persisting provider acceptance fails', async () => 
   expect(retry.status).toBe('uncertain')
   expect(send).toHaveBeenCalledOnce()
 })
+
 it('exposes raw and multipart attachment downloads and threads replies', async () => {
   const raw =
     'From: Human <human@example.net>\r\nReply-To: reply@example.net\r\nSubject: Unicode ✓\r\nMessage-ID: <multipart@example.net>\r\nMIME-Version: 1.0\r\nContent-Type: multipart/mixed; boundary=x\r\n\r\n--x\r\nContent-Type: text/plain; charset=utf-8\r\n\r\nHello ✓\r\n--x\r\nContent-Type: application/octet-stream; name="test.txt"\r\nContent-Disposition: attachment; filename="test.txt"\r\nContent-Transfer-Encoding: base64\r\n\r\naGVsbG8=\r\n--x--'
@@ -147,6 +153,7 @@ it('exposes raw and multipart attachment downloads and threads replies', async (
     throw new Error('Expected structured message')
   expect(sentMessage.headers?.['In-Reply-To']).toBe('<multipart@example.net>')
 })
+
 it('recovers raw content after a failed publication write', async () => {
   const raw = 'From: a@example.net\r\n\r\nRecovery'
   const faultyDB = overrideMethod(
@@ -187,6 +194,7 @@ it('recovers raw content after a failed publication write', async () => {
     )?.status,
   ).toBe('ready')
 })
+
 it('retries deletion and preserves cursor monotonicity after deleting all messages', async () => {
   const list = await json(await call('/v1/messages', mailbox.token), listSchema)
   const before = list.nextCursor
@@ -235,6 +243,7 @@ it('retries deletion and preserves cursor monotonicity after deleting all messag
   expect(after.messages).toHaveLength(1)
   expect(after.nextCursor).toBeGreaterThan(before)
 })
+
 it('revokes only the selected mailbox credential', async () => {
   const replacement = await json(
     await call(`/v1/mailboxes/${mailbox.id}/keys`, agent.token, {}, 'POST'),

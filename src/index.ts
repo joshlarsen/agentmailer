@@ -74,7 +74,9 @@ type SendAttempt = Pick<
 type SendRequest = z.infer<typeof sendSchema>
 const app = new Hono<AppEnvironment>()
 const MAX_MESSAGE_BYTES = 5 * 1024 * 1024
+
 const id = () => crypto.randomUUID()
+
 const hash = async (value: string | ArrayBuffer) =>
   Array.from(
     new Uint8Array(
@@ -85,21 +87,25 @@ const hash = async (value: string | ArrayBuffer) =>
     ),
     (x) => x.toString(16).padStart(2, '0'),
   ).join('')
+
 const token = () =>
   Array.from(crypto.getRandomValues(new Uint8Array(32)), (x) =>
     x.toString(16).padStart(2, '0'),
   ).join('')
+
 const statement = (
   env: Env,
   sql: string,
   ...values: (string | number | null | ArrayBuffer)[]
 ) => env.DB.prepare(sql).bind(...values)
+
 function hasErrorMessage(error: unknown, text: string): boolean {
   return (
     error instanceof Error &&
     (error.message.includes(text) || hasErrorMessage(error.cause, text))
   )
 }
+
 class Failure extends Error {
   constructor(
     public status: ContentfulStatusCode,
@@ -108,9 +114,11 @@ class Failure extends Error {
     super(code)
   }
 }
+
 function fail(status: ContentfulStatusCode, code: string): never {
   throw new Failure(status, code)
 }
+
 app.onError((error, c) => {
   return c.json(
     {
@@ -119,11 +127,14 @@ app.onError((error, c) => {
     error instanceof Failure ? error.status : 500,
   )
 })
+
 app.use('*', async (c, next) => {
   c.header('Cache-Control', 'no-store')
   await next()
 })
+
 app.get('/health', (c) => c.json({ ok: true }))
+
 app.use('/v1/*', async (c, next) => {
   const auth = c.req.header('Authorization')?.match(/^Bearer (\S+)$/)?.[1]
   if (!auth) return fail(401, 'unauthorized')
@@ -149,9 +160,11 @@ app.use('/v1/*', async (c, next) => {
   }
   await next()
 })
+
 function requireOwner(principal: Principal) {
   if (principal.kind !== 'owner') fail(403, 'forbidden')
 }
+
 async function findManagedMailbox(
   env: Env,
   principal: Principal,
@@ -170,10 +183,12 @@ async function findManagedMailbox(
     fail(404, 'not_found')
   return row
 }
+
 function requireMailboxId(principal: Principal) {
   if (principal.kind !== 'mailbox') fail(403, 'mailbox_key_required')
   return principal.id
 }
+
 async function readJsonBody(c: AppContext): Promise<unknown> {
   const reader = c.req.raw.body?.getReader()
   if (!reader) return fail(400, 'invalid_json')
@@ -202,11 +217,13 @@ async function readJsonBody(c: AppContext): Promise<unknown> {
     return fail(400, 'invalid_json')
   }
 }
+
 const parse = <T>(schema: z.ZodType<T>, value: unknown): T => {
   const validation = schema.safeParse(value)
   if (!validation.success) return fail(400, 'invalid_request')
   return validation.data
 }
+
 app.post('/v1/admin/agents', async (c) => {
   requireOwner(c.get('principal'))
   const requestBody = parse(
@@ -230,6 +247,7 @@ app.post('/v1/admin/agents', async (c) => {
   ).run()
   return c.json({ id: agentId, token: credential }, 201)
 })
+
 app.get('/v1/admin/agents', async (c) => {
   requireOwner(c.get('principal'))
   return c.json(
@@ -241,6 +259,7 @@ app.get('/v1/admin/agents', async (c) => {
     ).results,
   )
 })
+
 app.delete('/v1/admin/agents/:id', async (c) => {
   requireOwner(c.get('principal'))
   await statement(
@@ -250,6 +269,7 @@ app.delete('/v1/admin/agents/:id', async (c) => {
   ).run()
   return c.body(null, 204)
 })
+
 app.get('/v1/mailboxes', async (c) => {
   const principal = c.get('principal')
   if (principal.kind === 'mailbox') fail(403, 'forbidden')
@@ -265,6 +285,7 @@ app.get('/v1/mailboxes', async (c) => {
     ).results,
   )
 })
+
 app.post('/v1/mailboxes', async (c) => {
   const principal = c.get('principal')
   if (principal.kind !== 'agent') fail(403, 'provisioning_key_required')
@@ -306,6 +327,7 @@ app.post('/v1/mailboxes', async (c) => {
     201,
   )
 })
+
 app.post('/v1/mailboxes/:id/keys', async (c) => {
   await findManagedMailbox(c.env, c.get('principal'), c.req.param('id'))
   const keyId = id(),
@@ -319,6 +341,7 @@ app.post('/v1/mailboxes/:id/keys', async (c) => {
   ).run()
   return c.json({ id: keyId, token: credential }, 201)
 })
+
 app.delete('/v1/mailboxes/:id/keys/:key', async (c) => {
   await findManagedMailbox(c.env, c.get('principal'), c.req.param('id'))
   await statement(
@@ -329,6 +352,7 @@ app.delete('/v1/mailboxes/:id/keys/:key', async (c) => {
   ).run()
   return c.body(null, 204)
 })
+
 app.delete('/v1/mailboxes/:id', async (c) => {
   await findManagedMailbox(c.env, c.get('principal'), c.req.param('id'))
   await statement(
@@ -338,6 +362,7 @@ app.delete('/v1/mailboxes/:id', async (c) => {
   ).run()
   return c.body(null, 204)
 })
+
 app.get('/v1/messages', async (c) => {
   const mailboxId = requireMailboxId(c.get('principal'))
   const after = Number(c.req.query('after') || 0),
@@ -368,6 +393,7 @@ app.get('/v1/messages', async (c) => {
     nextCursor: rows.results.at(-1)?.seq ?? after,
   })
 })
+
 async function findMessage(env: Env, mailboxId: string, messageId: string) {
   const row = await statement(
     env,
@@ -378,6 +404,7 @@ async function findMessage(env: Env, mailboxId: string, messageId: string) {
   if (!row) return fail(404, 'not_found')
   return row
 }
+
 async function incomingContent(env: Env, record: MessageRow): Promise<Email> {
   const object = await env.MAIL.get(record.object_key)
   if (!object) return fail(503, 'content_unavailable')
@@ -391,6 +418,7 @@ async function incomingContent(env: Env, record: MessageRow): Promise<Email> {
   await env.MAIL.put(`${record.object_key}/parsed`, JSON.stringify(parsed))
   return parsed
 }
+
 async function content(
   env: Env,
   record: MessageRow,
@@ -400,6 +428,7 @@ async function content(
   if (!object) return fail(503, 'content_unavailable')
   return sendSchema.parse(await object.json<unknown>())
 }
+
 app.get('/v1/messages/:id', async (c) => {
   const message = await findMessage(
     c.env,
@@ -424,6 +453,7 @@ app.get('/v1/messages/:id', async (c) => {
     },
   })
 })
+
 app.get('/v1/messages/:id/raw', async (c) => {
   const message = await findMessage(
     c.env,
@@ -441,10 +471,12 @@ app.get('/v1/messages/:id/raw', async (c) => {
     },
   })
 })
+
 function attachmentContent(value: string | ArrayBuffer | Uint8Array): string {
   if (typeof value !== 'string') return fail(500, 'internal_error')
   return value
 }
+
 app.get('/v1/messages/:id/attachments/:index', async (c) => {
   const message = await findMessage(
     c.env,
@@ -473,6 +505,7 @@ app.get('/v1/messages/:id/attachments/:index', async (c) => {
     },
   )
 })
+
 app.patch('/v1/messages/:id', async (c) => {
   const mailboxId = requireMailboxId(c.get('principal'))
   await findMessage(c.env, mailboxId, c.req.param('id'))
@@ -489,6 +522,7 @@ app.patch('/v1/messages/:id', async (c) => {
   ).run()
   return c.body(null, 204)
 })
+
 app.delete('/v1/messages/:id', async (c) => {
   const message = await findMessage(
     c.env,
@@ -503,6 +537,7 @@ app.delete('/v1/messages/:id', async (c) => {
   await remove(c.env, message)
   return c.body(null, 204)
 })
+
 const address = z
   .string()
   .email()
@@ -547,6 +582,7 @@ const sendSchema = z
       .optional(),
   })
   .refine((b) => !!(b.text || b.html))
+
 async function send(c: AppContext, reply?: MessageRow): Promise<Response> {
   const env = c.env,
     mailboxId = requireMailboxId(c.get('principal'))
@@ -608,6 +644,7 @@ async function send(c: AppContext, reply?: MessageRow): Promise<Response> {
     fail(400, 'idempotency_key_required')
   // Keep the persisted hash format compatible with existing idempotency records.
   const digest = await hash(JSON.stringify({ b: sendInput, headers }))
+
   const previous = async () => {
     const attempt = await statement(
       env,
@@ -619,6 +656,7 @@ async function send(c: AppContext, reply?: MessageRow): Promise<Response> {
       fail(409, 'idempotency_conflict')
     return attempt
   }
+
   const existingAttempt = await previous()
   if (existingAttempt)
     return c.json({ ...existingAttempt, request_hash: undefined })
@@ -743,7 +781,9 @@ async function send(c: AppContext, reply?: MessageRow): Promise<Response> {
     201,
   )
 }
+
 app.post('/v1/send', (c) => send(c))
+
 app.post('/v1/messages/:id/reply', async (c) => {
   const message = await findMessage(
     c.env,
@@ -753,6 +793,7 @@ app.post('/v1/messages/:id/reply', async (c) => {
   if (message.direction !== 'incoming') fail(400, 'incoming_required')
   return send(c, message)
 })
+
 async function remove(env: Env, record: MessageRow) {
   await env.MAIL.delete([record.object_key, `${record.object_key}/parsed`])
   await statement(
@@ -761,6 +802,7 @@ async function remove(env: Env, record: MessageRow) {
     record.id,
   ).run()
 }
+
 export async function cleanup(env: Env): Promise<void> {
   const now = Date.now(),
     days = Number(env.RETENTION_DAYS || 0)
@@ -802,8 +844,10 @@ export async function cleanup(env: Env): Promise<void> {
     new Date(now - 7 * 86400000).toISOString().slice(0, 10),
   ).run()
 }
+
 export default {
   fetch: app.fetch,
+
   async email(incomingMessage: ForwardableEmailMessage, env: Env) {
     if (incomingMessage.rawSize > MAX_MESSAGE_BYTES) {
       incomingMessage.setReject('Message exceeds 5 MiB')
@@ -855,6 +899,7 @@ export default {
       messageId,
     ).run()
   },
+
   scheduled: (_: ScheduledController, env: Env, ctx: ExecutionContext) =>
     ctx.waitUntil(cleanup(env)),
 } satisfies ExportedHandler<Env>

@@ -1,4 +1,5 @@
-import { createExecutionContext, env } from 'cloudflare:test'
+import { createExecutionContext } from 'cloudflare:test'
+import { env } from 'cloudflare:workers'
 import { vi, type Mock } from 'vitest'
 import { z } from 'zod'
 
@@ -40,6 +41,7 @@ export async function json<T>(
   const value: unknown = await response.json()
   return schema.parse(value)
 }
+
 export async function call(
   path: string,
   token: string,
@@ -62,6 +64,7 @@ export async function call(
     createExecutionContext(),
   )
 }
+
 export function incomingMessage(
   overrides: Partial<ForwardableEmailMessage> = {},
 ): ForwardableEmailMessage {
@@ -88,6 +91,7 @@ export function incomingMessage(
     ...overrides,
   }
 }
+
 export function mockSend(): Mock<
   (message: EmailMessage | EmailMessageBuilder) => Promise<EmailSendResult>
 > {

@@ -24,9 +24,12 @@ const savedState = {
   retention: '30',
   sending: true,
 }
+
 function fixture(t, { state = savedState, env = {} } = {}) {
   const root = mkdtempSync(join(tmpdir(), 'agentmailer-setup-'))
+
   t.after(() => rmSync(root, { recursive: true, force: true }))
+
   mkdirSync(join(root, 'bin'))
   copyFileSync(resolve('test/fixtures/wrangler.cjs'), join(root, 'bin/npx'))
   chmodSync(join(root, 'bin/npx'), 0o755)
@@ -35,6 +38,7 @@ function fixture(t, { state = savedState, env = {} } = {}) {
       join(root, '.deployment.json'),
       typeof state === 'string' ? state : JSON.stringify(state),
     )
+
   const calls = () =>
     existsSync(join(root, 'calls'))
       ? readFileSync(join(root, 'calls'), 'utf8')
@@ -42,8 +46,10 @@ function fixture(t, { state = savedState, env = {} } = {}) {
           .split('\n')
           .map(JSON.parse)
       : []
+
   const readState = () =>
     JSON.parse(readFileSync(join(root, '.deployment.json'), 'utf8'))
+
   const invoke = (args = [], answers = [], overrides = {}) =>
     new Promise((resolve, reject) => {
       const child = spawn(process.execPath, [script, ...args], {
@@ -64,6 +70,7 @@ function fixture(t, { state = savedState, env = {} } = {}) {
         reject(new Error('Setup timed out: ' + stdout + stderr))
       }, 10000)
       child.on('error', reject)
+
       child.stdout.setEncoding('utf8').on('data', (chunk) => {
         stdout += chunk
         const next = answers[answered]
@@ -72,14 +79,17 @@ function fixture(t, { state = savedState, env = {} } = {}) {
           answered++
         }
       })
+
       child.stderr.setEncoding('utf8').on('data', (chunk) => {
         stderr += chunk
       })
+
       child.once('close', (code) => {
         clearTimeout(timeout)
         resolve({ code, stdout, stderr })
       })
     })
+
   return { root, calls, readState, invoke }
 }
 

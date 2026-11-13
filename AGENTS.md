@@ -20,6 +20,8 @@ outside the current v1 scope unless requested.
   schema changes; do not rewrite migrations that may already be deployed.
 - `scripts/setup.mjs`: Resumable setup, upgrade, and diagnostic commands.
 - `test/*.test.ts`: Worker runtime tests with local D1/R2 and mocked sending.
+- `test/tsconfig.json`: Editor-discoverable test project with Cloudflare runtime
+  and Vitest types. Keep its configuration aligned with `npm run check`.
 - `test/setup.test.mjs`: Setup command tests using a fake Wrangler executable.
 - `docs/openapi.json`: Public API contract; maintained directly.
 - `skills/agentmailer/SKILL.md`: Instructions for agents using the service.
@@ -43,7 +45,7 @@ npx wrangler deploy --dry-run
 Use Oxfmt for formatting supported source, configuration, and documentation
 files. Run `npm run format` to apply formatting and `npm run format:check` to
 check it without writing files. TypeScript and JavaScript use no trailing
-semicolons, two-space indentation, double quotes, and an 80-column print width.
+semicolons, two-space indentation, single quotes, and an 80-column print width.
 SQL is not formatted by Oxfmt.
 
 Run `npm run lint` for Oxlint correctness checks and the project's explicit
@@ -115,6 +117,13 @@ Existing shortcuts are not precedents; unrelated cleanup is unnecessary.
 
 ### Naming and structure
 
+- In `.js`, `.ts`, `.mjs`, and `.cjs` files, use exactly one blank line before
+  and after function declarations and function-valued variable declarations,
+  including nested helpers, when adjacent to other statements. Keep attached
+  comments and JSDoc together with the function. Separate method definitions
+  and standalone callback registrations (such as routes, hooks, and tests)
+  from adjacent statements or members in the same way. Do not add padding at
+  file or block boundaries, or around inline callbacks within expressions.
 - Prefer descriptive domain names. Conventional short callback names, such as
   Hono's `c`, are acceptable.
 - Prefer `const`, guard clauses, and straightforward control flow. Use `let`

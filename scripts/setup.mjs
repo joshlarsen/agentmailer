@@ -89,6 +89,7 @@ function runWrangler(args, { account, capture = false, input } = {}) {
     child.stderr?.setEncoding('utf8').on('data', (chunk) => {
       stderr += chunk
     })
+
     child.once('error', (error) =>
       reject(
         new Error('Could not start Wrangler; check that npm is available.', {
@@ -96,6 +97,7 @@ function runWrangler(args, { account, capture = false, input } = {}) {
         }),
       ),
     )
+
     child.once('close', (code, signal) => {
       if (code === 0) {
         resolve(stdout)
@@ -107,6 +109,7 @@ function runWrangler(args, { account, capture = false, input } = {}) {
         ),
       )
     })
+
     if (input !== undefined) {
       child.stdin?.on('error', (error) => {
         // An early child exit is reported by the close handler with its exit code.
@@ -176,6 +179,7 @@ async function collectSettings() {
 /** @param {DeploymentState} state */
 async function ensureDatabase(state) {
   if (state.db) return state.db
+
   const listDatabases = async () =>
     databaseListSchema.parse(
       JSON.parse(
@@ -185,6 +189,7 @@ async function ensureDatabase(state) {
         }),
       ),
     )
+
   const existing = (await listDatabases()).find(
     (database) => database.name === state.name,
   )
@@ -205,6 +210,7 @@ async function ensureDatabase(state) {
 /** @param {DeploymentState} state */
 async function ensureBucket(state) {
   if (state.bucket) return
+
   await runWrangler(['r2', 'bucket', 'create', state.name], {
     account: state.account,
   }).catch(async (error) => {

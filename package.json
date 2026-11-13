@@ -7,7 +7,7 @@
   "type": "module",
   "scripts": {
     "dev": "wrangler dev",
-    "check": "tsc && tsc -p tsconfig.test.json",
+    "check": "tsc && tsc -p test/tsconfig.json",
     "test": "vitest run && node --test test/setup.test.mjs",
     "setup": "node scripts/setup.mjs",
     "deploy": "wrangler deploy --config wrangler.deploy.json",

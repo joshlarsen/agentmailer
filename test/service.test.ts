@@ -16,6 +16,7 @@ import {
   type Credential,
   type MailboxCredential,
 } from './helpers'
+
 const call = (
   path: string,
   token: string,
@@ -23,7 +24,9 @@ const call = (
   method = data ? 'POST' : 'GET',
   headers: Record<string, string> = {},
 ) => request(path, token, data, method, environment, headers)
+
 let agent: Credential, mailbox: MailboxCredential
+
 beforeAll(async () => {
   await environment.DB.exec(
     migration.replace(/--[^\n]*/g, '').replace(/\n/g, ' '),
@@ -41,6 +44,7 @@ beforeAll(async () => {
     mailboxCredentialSchema,
   )
 })
+
 it('isolates roles and atomically limits mailbox creation', async () => {
   expect((await call('/v1/messages', agent.token)).status).toBe(403)
   const results = await Promise.all(
@@ -51,9 +55,11 @@ it('isolates roles and atomically limits mailbox creation', async () => {
   expect(results.map((message) => message.status).sort()).toEqual([201, 429])
   expect((await call('/v1/admin/agents', mailbox.token)).status).toBe(403)
 })
+
 it('stores, deduplicates, parses, polls and deletes MIME', async () => {
   const raw =
     'From: Human <human@example.net>\r\nTo: alpha@agents.example.com\r\nSubject: Hello\r\nMessage-ID: <a@example.net>\r\nContent-Type: text/plain; charset=utf-8\r\n\r\nHello world'
+
   const incoming = () =>
     incomingMessage({
       from: 'human@example.net',
@@ -63,6 +69,7 @@ it('stores, deduplicates, parses, polls and deletes MIME', async () => {
       headers: new Headers({ subject: 'Hello' }),
       setReject: vi.fn(),
     })
+
   await worker.email(incoming(), environment)
   await worker.email(incoming(), environment)
   const inbox = await json(
@@ -102,6 +109,7 @@ it('stores, deduplicates, parses, polls and deletes MIME', async () => {
     404,
   )
 })
+
 it('rejects unknown recipients and oversized email', async () => {
   for (const [to, size] of [
     ['unknown@agents.example.com', 1],
@@ -115,6 +123,7 @@ it('rejects unknown recipients and oversized email', async () => {
     expect(reject).toHaveBeenCalledOnce()
   }
 })
+
 it('sends idempotently, detects conflicts and applies quota', async () => {
   const send = mockSend().mockResolvedValue({ messageId: 'provider-1' })
   environment.EMAIL = { send }
@@ -157,6 +166,7 @@ it('sends idempotently, detects conflicts and applies quota', async () => {
   expect(results.map((message) => message.status).sort()).toEqual([201, 429])
   delete environment.EMAIL
 })
+
 it('recovers pending raw storage without losing polling visibility', async () => {
   await environment.DB.prepare(
     "INSERT INTO messages(id,mailbox,direction,status,created,object_key) VALUES('recover',?,'incoming','pending',0,'recover')",
@@ -175,6 +185,7 @@ it('recovers pending raw storage without losing polling visibility', async () =>
   )
   expect(after.messages.some((message) => message.id === 'recover')).toBe(true)
 })
+
 it('disabling an agent revokes descendant access', async () => {
   await call('/v1/admin/agents/' + agent.id, 'test-owner', undefined, 'DELETE')
   expect((await call('/v1/messages', mailbox.token)).status).toBe(401)
