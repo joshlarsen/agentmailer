@@ -41,7 +41,8 @@ function isMissingFile(error) {
   return error instanceof Error && 'code' in error && error.code === 'ENOENT'
 }
 
-/** @param {string} path
+/**
+ * @param {string} path
  * @returns {Promise<unknown>}
  */
 async function readJsonFile(path) {
@@ -62,8 +63,9 @@ async function readJsonFile(path) {
   }
 }
 
-/** @param {string[]} args
- * @param {{account?:string,capture?:boolean,input?:string}} options
+/**
+ * @param {string[]} args
+ * @param {{ account?: string; capture?: boolean; input?: string }} options
  * @returns {Promise<string>}
  */
 function runWrangler(args, { account, capture = false, input } = {}) {
